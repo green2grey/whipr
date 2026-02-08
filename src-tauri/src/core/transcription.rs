@@ -118,10 +118,10 @@ fn detect_gpu_name_uncached() -> Option<String> {
                 Err(_) => break,
             };
 
-            let mut desc = DXGI_ADAPTER_DESC1::default();
-            if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
-                continue;
-            }
+            let desc = match unsafe { adapter.GetDesc1() } {
+                Ok(desc) => desc,
+                Err(_) => continue,
+            };
 
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
                 continue;
