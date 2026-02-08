@@ -159,106 +159,43 @@ jobs:
           BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
           NOTES="See https://github.com/${REPO}/releases/tag/v${VERSION} for release notes."
 
-          # Ensure unmatched globs expand to nothing (not a literal pattern).
-          shopt -s nullglob
+          # Ensure unmatched globs expand to nothing and ** works recursively.
+          shopt -s nullglob globstar
 
-          # Read signatures
-          LINUX_SIG=""
-          MACOS_ARM64_SIG=""
-          MACOS_X64_SIG=""
-          WINDOWS_SIG=""
+          # Debug: show actual artifact structure
+          echo "=== Artifact structure ==="
+          find artifacts/ -type f | sort
+          echo "========================="
 
-          linux_sig_files=(artifacts/linux-artifacts/*.AppImage.sig)
-          if [ "${#linux_sig_files[@]}" -eq 1 ]; then
-            LINUX_SIG="$(cat "${linux_sig_files[0]}")"
-          elif [ "${#linux_sig_files[@]}" -gt 1 ]; then
-            echo "::error::Multiple signature files matched for LINUX_SIG (artifacts/linux-artifacts/*.AppImage.sig); refusing to guess: ${linux_sig_files[*]}"
-            exit 1
-          fi
-
-          macos_arm64_sig_files=(artifacts/macos-arm64-artifacts/*.app.tar.gz.sig)
-          if [ "${#macos_arm64_sig_files[@]}" -eq 1 ]; then
-            MACOS_ARM64_SIG="$(cat "${macos_arm64_sig_files[0]}")"
-          elif [ "${#macos_arm64_sig_files[@]}" -gt 1 ]; then
-            echo "::error::Multiple signature files matched for MACOS_ARM64_SIG (artifacts/macos-arm64-artifacts/*.app.tar.gz.sig); refusing to guess: ${macos_arm64_sig_files[*]}"
-            exit 1
-          fi
-
-          macos_x64_sig_files=(artifacts/macos-x64-artifacts/*.app.tar.gz.sig)
-          if [ "${#macos_x64_sig_files[@]}" -eq 1 ]; then
-            MACOS_X64_SIG="$(cat "${macos_x64_sig_files[0]}")"
-          elif [ "${#macos_x64_sig_files[@]}" -gt 1 ]; then
-            echo "::error::Multiple signature files matched for MACOS_X64_SIG (artifacts/macos-x64-artifacts/*.app.tar.gz.sig); refusing to guess: ${macos_x64_sig_files[*]}"
-            exit 1
-          fi
-
-          windows_sig_files=(artifacts/windows-artifacts/*.nsis.zip.sig)
-          if [ "${#windows_sig_files[@]}" -eq 1 ]; then
-            WINDOWS_SIG="$(cat "${windows_sig_files[0]}")"
-          elif [ "${#windows_sig_files[@]}" -gt 1 ]; then
-            echo "::error::Multiple signature files matched for WINDOWS_SIG (artifacts/windows-artifacts/*.nsis.zip.sig); refusing to guess: ${windows_sig_files[*]}"
-            exit 1
-          fi
+          # Read signatures (use ** to handle subdirectory nesting from upload-artifact)
+          LINUX_SIG="$(cat artifacts/linux-artifacts/**/*.AppImage.sig 2>/dev/null || true)"
+          MACOS_ARM64_SIG="$(cat artifacts/macos-arm64-artifacts/**/*.app.tar.gz.sig 2>/dev/null || true)"
+          MACOS_X64_SIG="$(cat artifacts/macos-x64-artifacts/**/*.app.tar.gz.sig 2>/dev/null || true)"
+          WINDOWS_SIG="$(cat artifacts/windows-artifacts/**/*.nsis.zip.sig 2>/dev/null || true)"
 
           missing_sigs=()
-          if [ -z "${LINUX_SIG//[[:space:]]/}" ]; then
-            missing_sigs+=("LINUX_SIG (artifacts/linux-artifacts/*.AppImage.sig)")
-          fi
-          if [ -z "${MACOS_ARM64_SIG//[[:space:]]/}" ]; then
-            missing_sigs+=("MACOS_ARM64_SIG (artifacts/macos-arm64-artifacts/*.app.tar.gz.sig)")
-          fi
-          if [ -z "${MACOS_X64_SIG//[[:space:]]/}" ]; then
-            missing_sigs+=("MACOS_X64_SIG (artifacts/macos-x64-artifacts/*.app.tar.gz.sig)")
-          fi
-          if [ -z "${WINDOWS_SIG//[[:space:]]/}" ]; then
-            missing_sigs+=("WINDOWS_SIG (artifacts/windows-artifacts/*.nsis.zip.sig)")
-          fi
+          [ -z "${LINUX_SIG}" ] && missing_sigs+=("linux .AppImage.sig")
+          [ -z "${MACOS_ARM64_SIG}" ] && missing_sigs+=("macos-arm64 .app.tar.gz.sig")
+          [ -z "${MACOS_X64_SIG}" ] && missing_sigs+=("macos-x64 .app.tar.gz.sig")
+          [ -z "${WINDOWS_SIG}" ] && missing_sigs+=("windows .nsis.zip.sig")
           if [ "${#missing_sigs[@]}" -ne 0 ]; then
-            echo "::error::Missing required signature(s); refusing to generate latest.json: ${missing_sigs[*]}"
+            echo "::error::Missing signature(s): ${missing_sigs[*]}"
             exit 1
           fi
 
           # Get filenames
-          LINUX_APPIMAGE=""
-          MACOS_ARM64_TAR=""
-          MACOS_X64_TAR=""
-          WINDOWS_NSIS_ZIP=""
-
-          linux_appimages=(artifacts/linux-artifacts/*.AppImage)
-          if [ "${#linux_appimages[@]}" -gt 0 ]; then
-            LINUX_APPIMAGE="$(basename "${linux_appimages[0]}")"
-          fi
-
-          macos_arm64_tars=(artifacts/macos-arm64-artifacts/*.app.tar.gz)
-          if [ "${#macos_arm64_tars[@]}" -gt 0 ]; then
-            MACOS_ARM64_TAR="$(basename "${macos_arm64_tars[0]}")"
-          fi
-
-          macos_x64_tars=(artifacts/macos-x64-artifacts/*.app.tar.gz)
-          if [ "${#macos_x64_tars[@]}" -gt 0 ]; then
-            MACOS_X64_TAR="$(basename "${macos_x64_tars[0]}")"
-          fi
-
-          windows_nsis_zips=(artifacts/windows-artifacts/*.nsis.zip)
-          if [ "${#windows_nsis_zips[@]}" -gt 0 ]; then
-            WINDOWS_NSIS_ZIP="$(basename "${windows_nsis_zips[0]}")"
-          fi
+          LINUX_APPIMAGE="$(find artifacts/linux-artifacts -name '*.AppImage' -not -name '*.sig' -printf '%f' -quit)"
+          MACOS_ARM64_TAR="$(find artifacts/macos-arm64-artifacts -name '*.app.tar.gz' -not -name '*.sig' -printf '%f' -quit)"
+          MACOS_X64_TAR="$(find artifacts/macos-x64-artifacts -name '*.app.tar.gz' -not -name '*.sig' -printf '%f' -quit)"
+          WINDOWS_NSIS_ZIP="$(find artifacts/windows-artifacts -name '*.nsis.zip' -not -name '*.sig' -printf '%f' -quit)"
 
           missing_files=()
-          if [ -z "${LINUX_APPIMAGE//[[:space:]]/}" ]; then
-            missing_files+=("LINUX_APPIMAGE (artifacts/linux-artifacts/*.AppImage)")
-          fi
-          if [ -z "${MACOS_ARM64_TAR//[[:space:]]/}" ]; then
-            missing_files+=("MACOS_ARM64_TAR (artifacts/macos-arm64-artifacts/*.app.tar.gz)")
-          fi
-          if [ -z "${MACOS_X64_TAR//[[:space:]]/}" ]; then
-            missing_files+=("MACOS_X64_TAR (artifacts/macos-x64-artifacts/*.app.tar.gz)")
-          fi
-          if [ -z "${WINDOWS_NSIS_ZIP//[[:space:]]/}" ]; then
-            missing_files+=("WINDOWS_NSIS_ZIP (artifacts/windows-artifacts/*.nsis.zip)")
-          fi
+          [ -z "${LINUX_APPIMAGE}" ] && missing_files+=("linux .AppImage")
+          [ -z "${MACOS_ARM64_TAR}" ] && missing_files+=("macos-arm64 .app.tar.gz")
+          [ -z "${MACOS_X64_TAR}" ] && missing_files+=("macos-x64 .app.tar.gz")
+          [ -z "${WINDOWS_NSIS_ZIP}" ] && missing_files+=("windows .nsis.zip")
           if [ "${#missing_files[@]}" -ne 0 ]; then
-            echo "::error::Missing required artifact(s); refusing to generate latest.json: ${missing_files[*]}"
+            echo "::error::Missing artifact(s): ${missing_files[*]}"
             exit 1
           fi
 
