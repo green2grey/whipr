@@ -4,7 +4,7 @@ pub struct HotkeyManager;
 
 #[allow(dead_code)]
 impl HotkeyManager {
-  pub fn new() -> Self {
-    Self
-  }
+    pub fn new() -> Self {
+        Self
+    }
 }

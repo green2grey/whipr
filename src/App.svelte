@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { check } from '@tauri-apps/plugin-updater';
+  import { relaunch } from '@tauri-apps/plugin-process';
   import {
     activateModel,
-    checkForUpdates,
     copyText,
     deleteModel,
     deleteTranscript,
@@ -41,7 +43,6 @@
     type Settings,
     type Transcript,
     type TranscriptUpdate,
-    type UpdateInfo,
   } from './lib/api';
   import { registerHotkeys, validateHotkeys } from './lib/hotkeys';
   import { theme, type ThemePreference } from './lib/theme';
@@ -82,6 +83,7 @@
   let unlistenPreview: UnlistenFn | null = null;
   let unlistenModelProgress: UnlistenFn | null = null;
   let unlistenImportProgress: UnlistenFn | null = null;
+  let unlistenAutomationError: UnlistenFn | null = null;
   let deleteConfirmModel: ModelInfo | null = null;
   let clearConfirmOpen = false;
   let clearingTranscripts = false;
@@ -96,8 +98,14 @@
   let detailDirty = false;
   let clipSavedId: string | null = null;
   let previewText = '';
-  let updateInfo: UpdateInfo | null = null;
+  let updateAvailable: { version: string; update: Awaited<ReturnType<typeof check>> } | null = null;
   let updateDismissed = false;
+  let updateDownloading = false;
+  // Percent [0..100] shown in the UI.
+  let updateProgress = 0;
+  // Byte counts used to compute updateProgress.
+  let updateProgressTotal = 0;
+  let updateProgressDownloaded = 0;
   let currentVersion = '';
   let storageStats: StorageStats | null = null;
   let performanceInfo: PerformanceInfo | null = null;
@@ -111,6 +119,7 @@
   let modelProgress: Record<string, { downloaded: number; total: number }> = {};
   let onboardingOpen = false;
   let onboardingStep = 0;
+  let onboardingErrorMessage = '';
   let settingsFocus: 'audio' | 'hotkeys' | 'automation' | 'app' | null = null;
   let settingsFocusTimer: number | null = null;
   let audioDeviceSaveInFlight = false;
@@ -124,9 +133,77 @@
   let transcriptSaved = false;
   let transcriptSaveTimer: number | null = null;
   let updateCheckTimer: number | null = null;
+  let wlClipboardInstallOpen = false;
+  let wlClipboardCopyError = '';
+
+  type NavState = { page: 'home' | 'settings' | 'clips' };
+  const appWindow = getCurrentWindow();
+
+  const isNavState = (value: unknown): value is NavState => {
+    if (!value || typeof value !== 'object') return false;
+    const state = value as { page?: unknown };
+    return state.page === 'home' || state.page === 'settings' || state.page === 'clips';
+  };
+
+  const navigateTo = (page: NavState['page'], replace = false) => {
+    currentPage = page;
+    const state: NavState = { page };
+    if (replace) {
+      window.history.replaceState(state, '');
+    } else {
+      window.history.pushState(state, '');
+    }
+  };
+
+  const handleNavBack = () => window.history.back();
+  const handleNavForward = () => window.history.forward();
+
+  const handleWindowClose = () => {
+    appWindow.close().catch(() => {});
+  };
+
+  const handleWindowMinimize = () => {
+    appWindow.minimize().catch(() => {});
+  };
+
+  const handleWindowToggleMaximize = () => {
+    appWindow.toggleMaximize().catch(() => {});
+  };
+
+  const handleTitlebarMouseDown = (event: MouseEvent) => {
+    // Fallback for environments where drag-region hit testing is unreliable.
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest('button, a, input, textarea, select, [role="button"]')) return;
+    appWindow.startDragging().catch(() => {});
+  };
 
   const tagOptions = ['Meeting', 'Task', 'Personal'];
   const onboardingTotal = onboardingSteps.length;
+
+  const wlClipboardInstallCommands = [
+    { label: 'Debian/Ubuntu', command: 'sudo apt install wl-clipboard' },
+    { label: 'Fedora', command: 'sudo dnf install wl-clipboard' },
+    { label: 'Arch', command: 'sudo pacman -S wl-clipboard' },
+    { label: 'openSUSE', command: 'sudo zypper install wl-clipboard' },
+  ] as const;
+
+  const closeWlClipboardInstall = () => {
+    wlClipboardInstallOpen = false;
+    wlClipboardCopyError = '';
+  };
+
+  const copyInstallCommand = async (command: string) => {
+    wlClipboardCopyError = '';
+    try {
+      await navigator.clipboard.writeText(command);
+    } catch (error) {
+      wlClipboardCopyError = error instanceof Error
+        ? `Copy failed: ${error.message}`
+        : 'Copy failed.';
+    }
+  };
 
   const formatTimestamp = (ms: number) => {
     const date = new Date(ms);
@@ -190,6 +267,10 @@
     path: string;
   };
 
+  type AutomationErrorEvent = {
+    message: string;
+  };
+
   const applyRecordingState = (recording: boolean, startedAtMs: number | null) => {
     if (recording) {
       const elapsedSeconds = typeof startedAtMs === 'number'
@@ -248,7 +329,7 @@
 
   const startOpenSettingsListener = async () => {
     unlistenOpenSettings = await listen('open-settings', () => {
-      currentPage = 'settings';
+      navigateTo('settings');
     });
   };
 
@@ -267,6 +348,13 @@
       } else {
         settings = updated;
       }
+    });
+  };
+
+  const startAutomationErrorListener = async () => {
+    unlistenAutomationError = await listen<AutomationErrorEvent>('automation-error', (event) => {
+      const message = event.payload?.message || 'Auto-paste failed.';
+      errorMessage = message.startsWith('Auto-paste') ? message : `Auto-paste failed: ${message}`;
     });
   };
 
@@ -299,6 +387,9 @@
 
   $: pasteUnavailable = runtimeInfo?.paste_method === 'unavailable';
   $: pasteLimited = runtimeInfo?.paste_method === 'clipboard_only';
+  $: wlClipboardMissing = runtimeInfo?.session_type === 'wayland'
+    && (runtimeInfo?.missing_helpers?.includes('wl-copy')
+      || runtimeInfo?.missing_helpers?.includes('wl-paste'));
   $: pasteActionLabel = pasteLimited ? 'Copy Last' : 'Paste Last';
   $: detailDirty = !!expandedTranscript
     && detailDraft.trim() !== (expandedTranscript.text ?? '').trim();
@@ -396,9 +487,12 @@
       if (!updateCheckTimer) {
         updateCheckTimer = window.setTimeout(async () => {
           try {
-            updateInfo = await checkForUpdates();
+            const result = await check();
+            if (result?.available) {
+              updateAvailable = { version: result.version, update: result };
+            }
           } catch {
-            updateInfo = null;
+            updateAvailable = null;
           }
         }, 1200);
       }
@@ -418,6 +512,21 @@
     startImportProgressListener();
     startOpenSettingsListener();
     startSettingsUpdatedListener();
+    startAutomationErrorListener();
+
+    // Keep the titlebar back/forward buttons working even without a router.
+    if (isNavState(window.history.state)) {
+      currentPage = window.history.state.page;
+    } else {
+      window.history.replaceState({ page: currentPage } satisfies NavState, '');
+    }
+    const onPopState = (event: PopStateEvent) => {
+      if (isNavState(event.state)) {
+        currentPage = event.state.page;
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   });
 
   onDestroy(() => {
@@ -449,6 +558,10 @@
     if (unlistenSettingsUpdated) {
       unlistenSettingsUpdated();
       unlistenSettingsUpdated = null;
+    }
+    if (unlistenAutomationError) {
+      unlistenAutomationError();
+      unlistenAutomationError = null;
     }
     if (detailCopyTimer) {
       clearTimeout(detailCopyTimer);
@@ -524,7 +637,7 @@
   };
 
   const openSettingsAt = async (section: 'audio' | 'hotkeys' | 'automation' | 'app') => {
-    currentPage = 'settings';
+    navigateTo('settings');
     await tick();
     focusSettingsSection(section);
     const target = section === 'audio'
@@ -558,11 +671,13 @@
 
   const finishOnboarding = async () => {
     onboardingOpen = false;
+    onboardingErrorMessage = '';
     await markOnboardingSeen();
   };
 
   const skipOnboarding = async () => {
     onboardingOpen = false;
+    onboardingErrorMessage = '';
     await markOnboardingSeen();
   };
 
@@ -575,15 +690,89 @@
   };
 
   const backOnboardingStep = () => {
+    onboardingErrorMessage = '';
     if (onboardingStep > 0) onboardingStep -= 1;
   };
 
   const skipOnboardingStep = () => {
+    onboardingErrorMessage = '';
     if (onboardingStep < onboardingTotal - 1) {
       onboardingStep += 1;
     } else {
       finishOnboarding();
     }
+  };
+
+  const handleOnboardingAudioDeviceSelect = async (nextId: string) => {
+    if (!settings) return;
+    if (audioDeviceSaveInFlight) return;
+    if (!nextId) return;
+
+    audioDeviceSaveInFlight = true;
+    onboardingErrorMessage = '';
+
+    try {
+      // Persist immediately so recording uses this device right away and it survives relaunch.
+      settings = await setAudioInputDevice(nextId);
+    } catch (error) {
+      onboardingErrorMessage = error instanceof Error ? error.message : 'Failed to save input device.';
+      try {
+        // Reload last saved settings to keep UI consistent with backend.
+        settings = await getSettings();
+      } catch {}
+    } finally {
+      audioDeviceSaveInFlight = false;
+    }
+  };
+
+  const advanceOnboardingStep = async (
+    event: CustomEvent<{
+      step: number;
+      hotkeys?: { record_toggle: string; paste_last: string; open_app: string };
+      automation?: {
+        auto_paste_enabled: boolean;
+        paste_delay_ms: number;
+        copy_to_clipboard: boolean;
+        preserve_clipboard: boolean;
+        paste_method: string;
+      };
+    }>
+  ) => {
+    onboardingErrorMessage = '';
+    if (!settings) {
+      nextOnboardingStep();
+      return;
+    }
+
+    const { hotkeys, automation } = event.detail;
+    if (hotkeys) {
+      settings = {
+        ...settings,
+        hotkeys: {
+          ...settings.hotkeys,
+          ...hotkeys,
+        },
+      };
+    }
+    if (automation) {
+      settings = {
+        ...settings,
+        automation: {
+          ...settings.automation,
+          ...automation,
+        },
+      };
+    }
+
+    if (hotkeys || automation) {
+      const ok = await handleSaveSettings();
+      if (!ok) {
+        onboardingErrorMessage = errorMessage || 'Failed to save settings.';
+        return;
+      }
+    }
+
+    nextOnboardingStep();
   };
 
   const handlePasteLast = async () => {
@@ -684,15 +873,21 @@
 
   const handleImportAudio = async () => {
     if (importing) return;
-    const selection = await open({
-      multiple: true,
-      filters: [
-        {
-          name: 'Audio',
-          extensions: ['wav', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg'],
-        },
-      ],
-    });
+    let selection: string | string[] | null = null;
+    try {
+      selection = await open({
+        multiple: true,
+        filters: [
+          {
+            name: 'Audio',
+            extensions: ['wav', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg'],
+          },
+        ],
+      });
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Failed to open file picker.';
+      return;
+    }
 
     if (!selection) return;
     const paths = Array.isArray(selection) ? selection : [selection];
@@ -725,15 +920,21 @@
     benchmarkError = '';
     benchmarkResult = null;
 
-    const selection = await open({
-      multiple: false,
-      filters: [
-        {
-          name: 'Audio',
-          extensions: ['wav', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg'],
-        },
-      ],
-    });
+    let selection: string | string[] | null = null;
+    try {
+      selection = await open({
+        multiple: false,
+        filters: [
+          {
+            name: 'Audio',
+            extensions: ['wav', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg'],
+          },
+        ],
+      });
+    } catch (error) {
+      benchmarkError = error instanceof Error ? error.message : 'Failed to open file picker.';
+      return;
+    }
 
     if (!selection || Array.isArray(selection)) return;
     benchmarking = true;
@@ -800,28 +1001,42 @@
     format === 'markdown' ? 'md' : 'txt';
 
   const pickDirectory = async () => {
-    const selection = await open({
-      directory: true,
-      multiple: false,
-    });
+    let selection: string | string[] | null = null;
+    try {
+      selection = await open({
+        directory: true,
+        multiple: false,
+      });
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Failed to open directory picker.';
+      return null;
+    }
     if (!selection || Array.isArray(selection)) return null;
     return selection;
   };
 
-  const handleSaveSettings = async () => {
-    if (!settings) return;
+  const handleSaveSettings = async (): Promise<boolean> => {
+    if (!settings) return false;
     savingSettings = true;
     errorMessage = '';
     const hotkeyError = validateHotkeys(settings);
     if (hotkeyError) {
       errorMessage = hotkeyError;
       savingSettings = false;
-      return;
+      return false;
     }
-    if (!settings.automation.copy_to_clipboard && settings.automation.paste_method === 'clipboard_only') {
-      errorMessage = 'Clipboard-only paste requires copy-to-clipboard to be enabled.';
+    if (
+      !(settings.automation.copy_to_clipboard || settings.automation.preserve_clipboard)
+      && settings.automation.paste_method === 'clipboard_only'
+    ) {
+      errorMessage = 'Clipboard-only paste requires clipboard usage to be enabled.';
       savingSettings = false;
-      return;
+      return false;
+    }
+    if (settings.automation.preserve_clipboard && settings.automation.paste_method === 'clipboard_only') {
+      errorMessage = 'Preserve clipboard cannot be used with "Clipboard only" paste.';
+      savingSettings = false;
+      return false;
     }
     try {
       settings = await saveSettings(settings);
@@ -846,8 +1061,10 @@
         storageStats = await getStorageStats();
       } catch {}
       await registerHotkeysSafely();
+      return true;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to save settings.';
+      return false;
     } finally {
       savingSettings = false;
     }
@@ -876,12 +1093,33 @@
     }
   };
 
-  const handleCopyUpdateLink = async () => {
-    if (!updateInfo) return;
+  const handleUpdate = async () => {
+    if (!updateAvailable?.update) return;
+    updateDownloading = true;
+    updateProgress = 0;
+    updateProgressTotal = 0;
+    updateProgressDownloaded = 0;
     try {
-      await copyText(updateInfo.url);
-    } catch {
-      // ignore
+      await updateAvailable.update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          updateProgressTotal = Number(event.data?.contentLength ?? 0) || 0;
+          updateProgressDownloaded = 0;
+          updateProgress = 0;
+        } else if (event.event === 'Progress') {
+          updateProgressDownloaded += Number(event.data?.chunkLength ?? 0) || 0;
+          if (updateProgressTotal > 0) {
+            updateProgress = Math.min(100, (updateProgressDownloaded / updateProgressTotal) * 100);
+          }
+        } else if (event.event === 'Finished') {
+          if (updateProgressTotal > 0) {
+            updateProgress = 100;
+          }
+        }
+      });
+      await relaunch();
+    } catch (err) {
+      errorMessage = err instanceof Error ? err.message : 'Update failed.';
+      updateDownloading = false;
     }
   };
 
@@ -889,10 +1127,16 @@
     const payload = formatCopyText(copyFormat, transcript, contentOverride ?? transcript.text);
     const ext = resolveExportExtension(copyFormat);
     const defaultName = `${sanitizeFilename(resolveTitle(transcript))}.${ext}`;
-    const path = await save({
-      defaultPath: defaultName,
-      filters: [{ name: ext === 'md' ? 'Markdown' : 'Text', extensions: [ext] }],
-    });
+    let path: string | null = null;
+    try {
+      path = await save({
+        defaultPath: defaultName,
+        filters: [{ name: ext === 'md' ? 'Markdown' : 'Text', extensions: [ext] }],
+      });
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Failed to open save dialog.';
+      return;
+    }
     if (!path) return;
     try {
       const outputPath = path.toLowerCase().endsWith(`.${ext}`)
@@ -1052,42 +1296,81 @@
 </script>
 
 <main class="app-shell">
-  <header class="titlebar">
-    <div class="titlebar-left">
-      <div class="traffic-lights" aria-hidden="true">
-        <span class="traffic-light" style="background-color: var(--traffic-close);"></span>
-        <span class="traffic-light" style="background-color: var(--traffic-minimize);"></span>
-        <span class="traffic-light" style="background-color: var(--traffic-zoom);"></span>
+  <header
+    class="titlebar"
+    role="presentation"
+    data-tauri-drag-region
+    on:mousedown={handleTitlebarMouseDown}
+  >
+    <div class="titlebar-left" data-tauri-drag-region>
+      <div class="traffic-lights" aria-label="Window controls" data-tauri-drag-region>
+        <button
+          class="traffic-light"
+          type="button"
+          aria-label="Close window"
+          data-tauri-drag-region="false"
+          on:mousedown|stopPropagation
+          on:click={handleWindowClose}
+          style="background-color: var(--traffic-close);"
+        ></button>
+        <button
+          class="traffic-light"
+          type="button"
+          aria-label="Minimize window"
+          data-tauri-drag-region="false"
+          on:mousedown|stopPropagation
+          on:click={handleWindowMinimize}
+          style="background-color: var(--traffic-minimize);"
+        ></button>
+        <button
+          class="traffic-light"
+          type="button"
+          aria-label="Toggle maximize"
+          data-tauri-drag-region="false"
+          on:mousedown|stopPropagation
+          on:click={handleWindowToggleMaximize}
+          style="background-color: var(--traffic-zoom);"
+        ></button>
       </div>
-      <div class="titlebar-nav">
-        <button class="icon-button" type="button" aria-label="Back">
+      <div class="titlebar-nav" data-tauri-drag-region>
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Back"
+          data-tauri-drag-region="false"
+          on:mousedown|stopPropagation
+          on:click={handleNavBack}
+        >
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12.5 4.5L7.5 10l5 5.5" />
           </svg>
         </button>
-        <button class="icon-button" type="button" aria-label="Forward">
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Forward"
+          data-tauri-drag-region="false"
+          on:mousedown|stopPropagation
+          on:click={handleNavForward}
+        >
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M7.5 4.5L12.5 10l-5 5.5" />
           </svg>
         </button>
       </div>
     </div>
-    <div class="titlebar-right">
+    <div class="titlebar-right" data-tauri-drag-region>
       <button
         class="icon-button"
         type="button"
         aria-label="Settings"
-        on:click={() => (currentPage = 'settings')}
+        data-tauri-drag-region="false"
+        on:mousedown|stopPropagation
+        on:click={() => navigateTo('settings')}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01A1.65 1.65 0 0 0 20.91 10H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
-      </button>
-      <button class="icon-button" type="button" aria-label="User profile">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 21a8 8 0 0 0-16 0" />
-          <circle cx="12" cy="7" r="4" />
         </svg>
       </button>
     </div>
@@ -1109,7 +1392,7 @@
         <button
           class={`nav-item ${currentPage === 'home' ? 'active' : ''}`}
           type="button"
-          on:click={() => (currentPage = 'home')}
+          on:click={() => navigateTo('home')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 10.5L12 3l9 7.5" />
@@ -1120,7 +1403,7 @@
         <button
           class={`nav-item ${currentPage === 'clips' ? 'active' : ''}`}
           type="button"
-          on:click={() => (currentPage = 'clips')}
+          on:click={() => navigateTo('clips')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="4" width="18" height="14" rx="2" />
@@ -1132,7 +1415,7 @@
         <button
           class={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
           type="button"
-          on:click={() => (currentPage = 'settings')}
+          on:click={() => navigateTo('settings')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="M9.4 1l.45 2.4a2 2 0 0 1-1 2.05L7.2 6.2a2 2 0 0 1-2.02-.2L3.4 4.6l-2.4 4.2 1.8 1.4a2 2 0 0 1 .6 2.16l-.8 2.2a2 2 0 0 1-1.8 1.2H0v4h1.8a2 2 0 0 1 1.8 1.2l.8 2.2a2 2 0 0 1-.6 2.16l-1.8 1.4 2.4 4.2 1.78-1.4a2 2 0 0 1 2.02-.2l1.66.94a2 2 0 0 1 1 2.05L9.4 23h5.2l.45-2.4a2 2 0 0 1 1-2.05l1.66-.94a2 2 0 0 1 2.02.2l1.78 1.4 2.4-4.2-1.8-1.4a2 2 0 0 1-.6-2.16l.8-2.2a2 2 0 0 1 1.8-1.2H24v-4h-1.8a2 2 0 0 1-1.8-1.2l-.8-2.2a2 2 0 0 1 .6-2.16l1.8-1.4-2.4-4.2-1.78 1.4a2 2 0 0 1-2.02.2l-1.66-.94a2 2 0 0 1-1-2.05L14.6 1H9.4z" />
@@ -1178,18 +1461,28 @@
                 <span>{hotkeyWarning}</span>
               </div>
             {/if}
-            {#if updateInfo && !updateDismissed}
+            {#if updateAvailable && !updateDismissed}
               <div class="banner info" role="status">
                 <span>
-                  Update available: {updateInfo.latest_version} (current {updateInfo.current_version})
+                  {#if updateDownloading}
+                    {#if updateProgressTotal > 0}
+                      Downloading update... {Math.floor(updateProgress)}%
+                    {:else}
+                      Downloading update...
+                    {/if}
+                  {:else}
+                    Update available: {updateAvailable.version} (current {currentVersion})
+                  {/if}
                 </span>
                 <div class="banner-actions">
-                  <button class="btn-tertiary" type="button" on:click={handleCopyUpdateLink}>
-                    Copy download link
-                  </button>
-                  <button class="btn-tertiary" type="button" on:click={() => (updateDismissed = true)}>
-                    Dismiss
-                  </button>
+                  {#if !updateDownloading}
+                    <button class="btn-tertiary" type="button" on:click={handleUpdate}>
+                      Update now
+                    </button>
+                    <button class="btn-tertiary" type="button" on:click={() => (updateDismissed = true)}>
+                      Dismiss
+                    </button>
+                  {/if}
                 </div>
               </div>
             {/if}
@@ -1586,7 +1879,30 @@
                       <p class="settings-hint">Copy output to clipboard automatically</p>
                     </div>
                     <div class="settings-control">
-                      <input id="keep-clipboard" type="checkbox" bind:checked={settings.automation.copy_to_clipboard} />
+                      <input
+                        id="keep-clipboard"
+                        type="checkbox"
+                        bind:checked={settings.automation.copy_to_clipboard}
+                        on:change={() => {
+                          if (settings && settings.automation.copy_to_clipboard) {
+                            settings.automation.preserve_clipboard = false;
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="settings-label">
+                      <label for="preserve-clipboard">Preserve clipboard contents</label>
+                      <p class="settings-hint">Auto-paste without leaving the transcript in your clipboard</p>
+                    </div>
+                    <div class="settings-control">
+                      <input
+                        id="preserve-clipboard"
+                        type="checkbox"
+                        bind:checked={settings.automation.preserve_clipboard}
+                        disabled={settings.automation.copy_to_clipboard}
+                      />
                     </div>
                   </div>
                   <div class="settings-row">
@@ -1903,8 +2219,8 @@
                     </div>
                     <div class="settings-control">
                       <select id="channels" class="select-compact" bind:value={settings.audio.channels}>
-                        <option value={1}>Mono (1)</option>
-                        <option value={2}>Stereo (2)</option>
+                        <option value={1}>Mono</option>
+                        <option value={2}>Stereo</option>
                       </select>
                     </div>
                   </div>
@@ -2204,6 +2520,15 @@
                     </div>
                     <div class="settings-control">
                       <span class="diag-value">{runtimeInfo?.paste_method ?? 'unknown'}</span>
+                      {#if wlClipboardMissing}
+                        <button
+                          class="btn-tertiary"
+                          type="button"
+                          on:click={() => (wlClipboardInstallOpen = true)}
+                        >
+                          Install wl-clipboard
+                        </button>
+                      {/if}
                     </div>
                   </div>
                   <div class="settings-row">
@@ -2242,7 +2567,7 @@
                       <span>App version</span>
                     </div>
                     <div class="settings-control">
-                      <span class="diag-value">{currentVersion || updateInfo?.current_version || 'unknown'}</span>
+                      <span class="diag-value">{currentVersion || 'unknown'}</span>
                     </div>
                   </div>
                 </div>
@@ -2298,21 +2623,20 @@
     </section>
   </div>
 
-  <Onboarding
-    open={onboardingOpen}
-    step={onboardingStep}
-    settings={settings}
-    runtimeInfo={runtimeInfo}
-    audioDevices={audioDevices}
-    on:next={nextOnboardingStep}
-    on:back={backOnboardingStep}
-    on:skipStep={skipOnboardingStep}
-    on:skipAll={skipOnboarding}
-    on:finish={finishOnboarding}
-    on:openSettings={(event) => {
-      openSettingsAt(event.detail.section);
-    }}
-  />
+	  <Onboarding
+	    open={onboardingOpen}
+	    step={onboardingStep}
+	    settings={settings}
+	    runtimeInfo={runtimeInfo}
+	    audioDevices={audioDevices}
+	    errorMessage={onboardingErrorMessage}
+	    on:advance={advanceOnboardingStep}
+	    on:selectAudioDevice={(event) => handleOnboardingAudioDeviceSelect(event.detail.id)}
+	    on:back={backOnboardingStep}
+	    on:skipStep={skipOnboardingStep}
+	    on:skipAll={skipOnboarding}
+	    on:finish={finishOnboarding}
+	  />
 
   <ConfirmDialog
     open={clearConfirmOpen}
@@ -2343,26 +2667,100 @@
     on:cancel={() => (deleteConfirmModel = null)}
   />
 
-  <ConfirmDialog
-    open={deleteConfirmTranscript !== null}
-    title="Delete transcript?"
-    message={`Delete "${deleteConfirmTranscript ? resolveTitle(deleteConfirmTranscript) : ''}"?`}
-    confirmLabel="Delete"
-    cancelLabel="Cancel"
-    destructive={true}
-    on:confirm={() => {
-      if (deleteConfirmTranscript) {
-        handleDeleteTranscript(deleteConfirmTranscript);
-      }
-      deleteConfirmTranscript = null;
-    }}
-    on:cancel={() => (deleteConfirmTranscript = null)}
-  />
+	  <ConfirmDialog
+	    open={deleteConfirmTranscript !== null}
+	    title="Delete transcript?"
+	    message={`Delete "${deleteConfirmTranscript ? resolveTitle(deleteConfirmTranscript) : ''}"?`}
+	    confirmLabel="Delete"
+	    cancelLabel="Cancel"
+	    destructive={true}
+	    on:confirm={() => {
+	      if (deleteConfirmTranscript) {
+	        handleDeleteTranscript(deleteConfirmTranscript);
+	      }
+	      deleteConfirmTranscript = null;
+	    }}
+	    on:cancel={() => (deleteConfirmTranscript = null)}
+	  />
 
-  {#if expandedTranscript}
-    <div class="modal-backdrop" role="presentation">
-      <button
-        class="modal-dismiss"
+	  {#if wlClipboardInstallOpen}
+	    <div class="modal-backdrop" role="presentation">
+	      <button
+	        class="modal-dismiss"
+	        type="button"
+	        aria-label="Close wl-clipboard install"
+	        on:click={closeWlClipboardInstall}
+	      ></button>
+	      <div
+	        class="modal-card helper-install"
+	        role="dialog"
+	        aria-modal="true"
+	        aria-labelledby="wlcb-title"
+	      >
+	        <div class="modal-header">
+	          <div>
+	            <h2 id="wlcb-title">Install wl-clipboard</h2>
+	            <p class="modal-summary">
+	              Needed on Wayland for clipboard integration. This installs <code class="code-hint">wl-copy</code> and
+	              <code class="code-hint">wl-paste</code>.
+	            </p>
+	          </div>
+	          <button class="icon-button" type="button" aria-label="Close" on:click={closeWlClipboardInstall}>
+	            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+	              <path d="M18 6L6 18" />
+	              <path d="M6 6l12 12" />
+	            </svg>
+	          </button>
+	        </div>
+	        <div class="modal-body">
+	          <div class="helper-install-list">
+	            {#each wlClipboardInstallCommands as entry}
+	              <div class="helper-install-item">
+	                <div class="helper-install-row">
+	                  <span class="helper-install-label">{entry.label}</span>
+	                  <button
+	                    class="btn-tertiary"
+	                    type="button"
+	                    on:click={() => copyInstallCommand(entry.command)}
+	                  >
+	                    Copy
+	                  </button>
+	                </div>
+	                <pre class="helper-install-code"><code>{entry.command}</code></pre>
+	              </div>
+	            {/each}
+	          </div>
+	          {#if wlClipboardCopyError}
+	            <p class="helper-install-error">{wlClipboardCopyError} Select the command above and copy it manually.</p>
+	          {/if}
+	          <p class="settings-hint">After installing, relaunch Whispr to re-detect helpers.</p>
+	        </div>
+	        <div class="modal-footer">
+	          <div class="modal-actions">
+	            <button class="btn-secondary" type="button" on:click={closeWlClipboardInstall}>Close</button>
+	            <button
+	              class="btn-primary"
+	              type="button"
+	              on:click={async () => {
+	                try {
+	                  await relaunch();
+	                } catch (error) {
+	                  wlClipboardCopyError = error instanceof Error ? error.message : 'Failed to relaunch.';
+	                }
+	              }}
+	            >
+	              Relaunch app
+	            </button>
+	          </div>
+	        </div>
+	      </div>
+	    </div>
+	  {/if}
+
+	  {#if expandedTranscript}
+	    <div class="modal-backdrop" role="presentation">
+	      <button
+	        class="modal-dismiss"
         type="button"
         aria-label="Close transcript details"
         on:click={closeTranscriptDetail}

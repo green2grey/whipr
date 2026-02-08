@@ -67,12 +67,14 @@ jobs:
         run: npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Tauri (macOS ARM64)
         if: matrix.target == 'aarch64-apple-darwin'
         run: npm run tauri build -- --target aarch64-apple-darwin --config src-tauri/tauri.macos.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CFLAGS: -march=armv8-a
           CXXFLAGS: -march=armv8-a
 
@@ -81,12 +83,14 @@ jobs:
         run: npm run tauri build -- --target x86_64-apple-darwin --config src-tauri/tauri.macos.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Tauri (Windows)
         if: matrix.platform == 'windows-latest'
         run: npm run tauri build -- --config src-tauri/tauri.conf.windows.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Linux artifacts
         if: matrix.platform == 'ubuntu-22.04'
@@ -95,6 +99,7 @@ jobs:
           name: linux-artifacts
           path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/release/bundle/deb/*.deb
 
       - name: Upload macOS ARM64 artifacts
@@ -103,6 +108,8 @@ jobs:
         with:
           name: macos-arm64-artifacts
           path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
 
       - name: Upload macOS x64 artifacts
@@ -111,6 +118,8 @@ jobs:
         with:
           name: macos-x64-artifacts
           path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
 
       - name: Upload Windows artifacts
@@ -120,7 +129,10 @@ jobs:
           name: windows-artifacts
           path: |
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
 
   release:
     needs: build
@@ -136,16 +148,165 @@ jobs:
         with:
           path: artifacts
 
+      - name: Get tag version
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate latest.json
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
+          NOTES="See https://github.com/${REPO}/releases/tag/v${VERSION} for release notes."
+
+          # Ensure unmatched globs expand to nothing (not a literal pattern).
+          shopt -s nullglob
+
+          # Read signatures
+          LINUX_SIG=""
+          MACOS_ARM64_SIG=""
+          MACOS_X64_SIG=""
+          WINDOWS_SIG=""
+
+          linux_sig_files=(artifacts/linux-artifacts/*.AppImage.sig)
+          if [ "${#linux_sig_files[@]}" -eq 1 ]; then
+            LINUX_SIG="$(cat "${linux_sig_files[0]}")"
+          elif [ "${#linux_sig_files[@]}" -gt 1 ]; then
+            echo "::error::Multiple signature files matched for LINUX_SIG (artifacts/linux-artifacts/*.AppImage.sig); refusing to guess: ${linux_sig_files[*]}"
+            exit 1
+          fi
+
+          macos_arm64_sig_files=(artifacts/macos-arm64-artifacts/*.app.tar.gz.sig)
+          if [ "${#macos_arm64_sig_files[@]}" -eq 1 ]; then
+            MACOS_ARM64_SIG="$(cat "${macos_arm64_sig_files[0]}")"
+          elif [ "${#macos_arm64_sig_files[@]}" -gt 1 ]; then
+            echo "::error::Multiple signature files matched for MACOS_ARM64_SIG (artifacts/macos-arm64-artifacts/*.app.tar.gz.sig); refusing to guess: ${macos_arm64_sig_files[*]}"
+            exit 1
+          fi
+
+          macos_x64_sig_files=(artifacts/macos-x64-artifacts/*.app.tar.gz.sig)
+          if [ "${#macos_x64_sig_files[@]}" -eq 1 ]; then
+            MACOS_X64_SIG="$(cat "${macos_x64_sig_files[0]}")"
+          elif [ "${#macos_x64_sig_files[@]}" -gt 1 ]; then
+            echo "::error::Multiple signature files matched for MACOS_X64_SIG (artifacts/macos-x64-artifacts/*.app.tar.gz.sig); refusing to guess: ${macos_x64_sig_files[*]}"
+            exit 1
+          fi
+
+          windows_sig_files=(artifacts/windows-artifacts/*.nsis.zip.sig)
+          if [ "${#windows_sig_files[@]}" -eq 1 ]; then
+            WINDOWS_SIG="$(cat "${windows_sig_files[0]}")"
+          elif [ "${#windows_sig_files[@]}" -gt 1 ]; then
+            echo "::error::Multiple signature files matched for WINDOWS_SIG (artifacts/windows-artifacts/*.nsis.zip.sig); refusing to guess: ${windows_sig_files[*]}"
+            exit 1
+          fi
+
+          missing_sigs=()
+          if [ -z "${LINUX_SIG//[[:space:]]/}" ]; then
+            missing_sigs+=("LINUX_SIG (artifacts/linux-artifacts/*.AppImage.sig)")
+          fi
+          if [ -z "${MACOS_ARM64_SIG//[[:space:]]/}" ]; then
+            missing_sigs+=("MACOS_ARM64_SIG (artifacts/macos-arm64-artifacts/*.app.tar.gz.sig)")
+          fi
+          if [ -z "${MACOS_X64_SIG//[[:space:]]/}" ]; then
+            missing_sigs+=("MACOS_X64_SIG (artifacts/macos-x64-artifacts/*.app.tar.gz.sig)")
+          fi
+          if [ -z "${WINDOWS_SIG//[[:space:]]/}" ]; then
+            missing_sigs+=("WINDOWS_SIG (artifacts/windows-artifacts/*.nsis.zip.sig)")
+          fi
+          if [ "${#missing_sigs[@]}" -ne 0 ]; then
+            echo "::error::Missing required signature(s); refusing to generate latest.json: ${missing_sigs[*]}"
+            exit 1
+          fi
+
+          # Get filenames
+          LINUX_APPIMAGE=""
+          MACOS_ARM64_TAR=""
+          MACOS_X64_TAR=""
+          WINDOWS_NSIS_ZIP=""
+
+          linux_appimages=(artifacts/linux-artifacts/*.AppImage)
+          if [ "${#linux_appimages[@]}" -gt 0 ]; then
+            LINUX_APPIMAGE="$(basename "${linux_appimages[0]}")"
+          fi
+
+          macos_arm64_tars=(artifacts/macos-arm64-artifacts/*.app.tar.gz)
+          if [ "${#macos_arm64_tars[@]}" -gt 0 ]; then
+            MACOS_ARM64_TAR="$(basename "${macos_arm64_tars[0]}")"
+          fi
+
+          macos_x64_tars=(artifacts/macos-x64-artifacts/*.app.tar.gz)
+          if [ "${#macos_x64_tars[@]}" -gt 0 ]; then
+            MACOS_X64_TAR="$(basename "${macos_x64_tars[0]}")"
+          fi
+
+          windows_nsis_zips=(artifacts/windows-artifacts/*.nsis.zip)
+          if [ "${#windows_nsis_zips[@]}" -gt 0 ]; then
+            WINDOWS_NSIS_ZIP="$(basename "${windows_nsis_zips[0]}")"
+          fi
+
+          missing_files=()
+          if [ -z "${LINUX_APPIMAGE//[[:space:]]/}" ]; then
+            missing_files+=("LINUX_APPIMAGE (artifacts/linux-artifacts/*.AppImage)")
+          fi
+          if [ -z "${MACOS_ARM64_TAR//[[:space:]]/}" ]; then
+            missing_files+=("MACOS_ARM64_TAR (artifacts/macos-arm64-artifacts/*.app.tar.gz)")
+          fi
+          if [ -z "${MACOS_X64_TAR//[[:space:]]/}" ]; then
+            missing_files+=("MACOS_X64_TAR (artifacts/macos-x64-artifacts/*.app.tar.gz)")
+          fi
+          if [ -z "${WINDOWS_NSIS_ZIP//[[:space:]]/}" ]; then
+            missing_files+=("WINDOWS_NSIS_ZIP (artifacts/windows-artifacts/*.nsis.zip)")
+          fi
+          if [ "${#missing_files[@]}" -ne 0 ]; then
+            echo "::error::Missing required artifact(s); refusing to generate latest.json: ${missing_files[*]}"
+            exit 1
+          fi
+
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -n \
+            --arg version "v${VERSION}" \
+            --arg notes "${NOTES}" \
+            --arg pub_date "${PUB_DATE}" \
+            --arg linux_sig "${LINUX_SIG}" \
+            --arg linux_url "${BASE}/${LINUX_APPIMAGE}" \
+            --arg macos_arm64_sig "${MACOS_ARM64_SIG}" \
+            --arg macos_arm64_url "${BASE}/${MACOS_ARM64_TAR}" \
+            --arg macos_x64_sig "${MACOS_X64_SIG}" \
+            --arg macos_x64_url "${BASE}/${MACOS_X64_TAR}" \
+            --arg windows_sig "${WINDOWS_SIG}" \
+            --arg windows_url "${BASE}/${WINDOWS_NSIS_ZIP}" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "darwin-aarch64": { signature: $macos_arm64_sig, url: $macos_arm64_url },
+                "darwin-x86_64": { signature: $macos_x64_sig, url: $macos_x64_url },
+                "windows-x86_64": { signature: $windows_sig, url: $windows_url }
+              }
+            }' > latest.json
+
+          cat latest.json
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2.5.0
         with:
-          draft: true
+          # v2+: prefer the `token` input over the legacy `GITHUB_TOKEN` env var.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
           generate_release_notes: true
           files: |
             artifacts/**/*.AppImage
+            artifacts/**/*.AppImage.sig
             artifacts/**/*.deb
             artifacts/**/*.dmg
+            artifacts/**/*.app.tar.gz
+            artifacts/**/*.app.tar.gz.sig
             artifacts/**/*.msi
+            artifacts/**/*.msi.sig
             artifacts/**/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            artifacts/**/*.nsis.zip
+            artifacts/**/*.nsis.zip.sig
+            latest.json

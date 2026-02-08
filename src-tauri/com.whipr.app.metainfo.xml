@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>com.whipr.app</id>
+  <name>Whipr</name>
+  <summary>Fast, private voice transcription</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="com.whipr">
+    <name>greenuni</name>
+  </developer>
+
+  <launchable type="desktop-id">Whipr.desktop</launchable>
+  <content_rating type="oars-1.1" />
+
+  <description>
+    <p>
+      Whipr is a desktop application for fast, local voice transcription.
+      Press a hotkey, speak, and your words are transcribed and pasted directly into any application.
+    </p>
+    <p>All processing happens on your machine.</p>
+  </description>
+
+  <url type="homepage">https://github.com/green2grey/whipr</url>
+  <url type="bugtracker">https://github.com/green2grey/whipr/issues</url>
+  <url type="vcs-browser">https://github.com/green2grey/whipr</url>
+
+  <categories>
+    <category>Utility</category>
+    <category>AudioVideo</category>
+  </categories>
+
+  <provides>
+    <binary>whispr</binary>
+  </provides>
+
+  <releases>
+    <release version="0.2.0" date="2026-02-08" urgency="medium">
+      <description>
+        <p>Added native auto-update support via Tauri updater plugin. From this version onward, the app can check, download, and install updates in-place.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2025-12-01">
+      <description>
+        <p>Initial release with local voice transcription, hotkey-driven recording, clipboard integration, and GNOME Shell overlay.</p>
+      </description>
+    </release>
+  </releases>
+</component>
+

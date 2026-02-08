@@ -10,32 +10,32 @@ use crate::settings::Settings;
 use crate::types::{Clip, Transcript};
 
 pub struct AppState {
-  pub settings: Settings,
-  pub transcripts: Vec<Transcript>,
-  pub clips: Vec<Clip>,
-  pub recording: bool,
-  pub recording_started_at: Option<Instant>,
-  pub preview_cancel: Option<Arc<AtomicBool>>,
-  pub audio_tx: Sender<AudioCommand>,
-  pub last_focus_window: Option<String>,
+    pub settings: Settings,
+    pub transcripts: Vec<Transcript>,
+    pub clips: Vec<Clip>,
+    pub recording: bool,
+    pub recording_started_at: Option<Instant>,
+    pub preview_cancel: Option<Arc<AtomicBool>>,
+    pub audio_tx: Sender<AudioCommand>,
+    pub last_focus_window: Option<String>,
 }
 
 impl AppState {
-  pub fn load() -> Self {
-    let settings = load_settings();
-    let transcripts = load_transcripts_with_retention(&settings);
-    let clips = load_clips(&settings);
-    let audio_tx = audio::start_worker();
+    pub fn load() -> Self {
+        let settings = load_settings();
+        let transcripts = load_transcripts_with_retention(&settings);
+        let clips = load_clips(&settings);
+        let audio_tx = audio::start_worker();
 
-    Self {
-      settings,
-      transcripts,
-      clips,
-      recording: false,
-      recording_started_at: None,
-      preview_cancel: None,
-      audio_tx,
-      last_focus_window: None,
+        Self {
+            settings,
+            transcripts,
+            clips,
+            recording: false,
+            recording_started_at: None,
+            preview_cancel: None,
+            audio_tx,
+            last_focus_window: None,
+        }
     }
-  }
 }

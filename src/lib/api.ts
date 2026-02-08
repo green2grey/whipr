@@ -30,6 +30,7 @@ export type Settings = {
     auto_paste_enabled: boolean;
     paste_delay_ms: number;
     copy_to_clipboard: boolean;
+    preserve_clipboard: boolean;
     paste_method: string;
   };
   storage: {
@@ -170,9 +171,9 @@ export const deleteClip = (id: string) => invoke<boolean>('delete_clip', { id })
 
 export const listModels = () => invoke<ModelInfo[]>('list_models');
 export const downloadModel = (modelId: string) =>
-  invoke<ModelInfo[]>('download_model', { modelId });
+  invoke<ModelInfo[]>('download_model', { model_id: modelId });
 export const deleteModel = (modelId: string) =>
-  invoke<ModelInfo[]>('delete_model', { modelId });
+  invoke<ModelInfo[]>('delete_model', { model_id: modelId });
 export const activateModel = (modelId: string) =>
-  invoke<ModelInfo[]>('activate_model', { modelId });
+  invoke<ModelInfo[]>('activate_model', { model_id: modelId });
 export const cycleModel = () => invoke<ModelInfo[]>('cycle_model');

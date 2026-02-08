@@ -11,6 +11,8 @@ const STATE_DIR = 'whispr';
 const CONFIG_DIR = 'whispr';
 const STATE_FILE = 'overlay.json';
 const TRAY_FILE = 'tray.json';
+const STATE_TMP_FILE = STATE_FILE.replace(/\.json$/i, '.tmp');
+const TRAY_TMP_FILE = TRAY_FILE.replace(/\.json$/i, '.tmp');
 const CONFIG_FILE = 'overlay-config.json';
 const DEFAULT_COMMAND = 'whispr';
 const MARGIN_BOTTOM = 32;
@@ -21,6 +23,7 @@ const BAR_WEIGHTS = [0.35, 0.55, 0.8, 1.0, 0.9, 0.9, 1.0, 0.8, 0.55, 0.35];
 const DOUBLE_CLICK_MS = 220;
 const SUCCESS_FLASH_MS = 3000;
 const ERROR_FLASH_MS = 4000;
+const STALE_STATE_MS = 5000;
 
 export default class WhisprOverlayExtension extends Extension {
   enable() {
@@ -39,6 +42,8 @@ export default class WhisprOverlayExtension extends Extension {
     this._pollTimerId = null;
     this._clickTimerId = null;
     this._statusTimerId = null;
+    this._loadOverlayTimerId = null;
+    this._loadTrayTimerId = null;
 
     this._overlay = this._buildOverlay();
     this._overlay.hide();
@@ -66,7 +71,8 @@ export default class WhisprOverlayExtension extends Extension {
     this._layoutSignals = [];
     this._layoutSignals.push(Main.layoutManager.connect('monitors-changed', () => this._positionOverlay()));
 
-    this._loadState();
+    this._loadOverlayState();
+    this._loadTrayState();
   }
 
   disable() {
@@ -74,6 +80,7 @@ export default class WhisprOverlayExtension extends Extension {
     this._stopClock();
     this._clearClickTimer();
     this._clearStatusTimer();
+    this._clearLoadTimers();
 
     if (this._monitor) {
       if (this._monitorId) {
@@ -249,27 +256,67 @@ export default class WhisprOverlayExtension extends Extension {
   _watchState() {
     try {
       this._monitor = this._stateDir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
-      this._monitorId = this._monitor.connect('changed', (_monitor, file) => {
-        if (!file) return;
-        const basename = file.get_basename();
-        if (basename !== STATE_FILE && basename !== TRAY_FILE) return;
-        this._loadState();
+      this._monitorId = this._monitor.connect('changed', (_monitor, file, otherFile, _eventType) => {
+        const basenames = [];
+        if (file) basenames.push(file.get_basename());
+        if (otherFile) basenames.push(otherFile.get_basename());
+
+        // The app writes atomically using a tmp file and rename:
+        // overlay.json -> overlay.tmp -> overlay.json (same for tray.json).
+        // Gio can report only the tmp file in 'file' and the final file in 'otherFile'.
+        if (basenames.some((name) => name === STATE_FILE || name === STATE_TMP_FILE)) {
+          this._scheduleLoadOverlay();
+        }
+        if (basenames.some((name) => name === TRAY_FILE || name === TRAY_TMP_FILE)) {
+          this._scheduleLoadTray();
+        }
       });
     } catch (error) {
       // If monitoring fails, fall back to a simple poll.
       this._monitor = null;
       this._monitorId = null;
       this._pollTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-        this._loadState();
+        this._loadOverlayState();
+        this._loadTrayState();
         return true;
       });
     }
   }
 
-  _loadState() {
+  _scheduleLoadOverlay() {
+    if (this._loadOverlayTimerId) return;
+    this._loadOverlayTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60, () => {
+      this._loadOverlayTimerId = null;
+      this._loadOverlayState();
+      return GLib.SOURCE_REMOVE;
+    });
+  }
+
+  _scheduleLoadTray() {
+    if (this._loadTrayTimerId) return;
+    this._loadTrayTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
+      this._loadTrayTimerId = null;
+      this._loadTrayState();
+      return GLib.SOURCE_REMOVE;
+    });
+  }
+
+  _clearLoadTimers() {
+    if (this._loadOverlayTimerId) {
+      GLib.source_remove(this._loadOverlayTimerId);
+      this._loadOverlayTimerId = null;
+    }
+    if (this._loadTrayTimerId) {
+      GLib.source_remove(this._loadTrayTimerId);
+      this._loadTrayTimerId = null;
+    }
+  }
+
+  _loadOverlayState() {
     let recording = false;
     let startedAtMs = null;
     let level = 0;
+    let updatedAtMs = null;
 
     try {
       const [ok, contents] = this._stateFile.load_contents(null);
@@ -283,15 +330,26 @@ export default class WhisprOverlayExtension extends Extension {
         if (Number.isFinite(data.level)) {
           level = Math.max(0, Math.min(1, Number(data.level)));
         }
+        if (Number.isFinite(data.updated_at_ms)) {
+          updatedAtMs = data.updated_at_ms;
+        }
       }
     } catch (error) {
+      recording = false;
+      startedAtMs = null;
+      level = 0;
+      updatedAtMs = null;
+    }
+
+    // If the app crashed or isn't running, stale state can leave the overlay "stuck".
+    // Treat stale recording state as inactive.
+    if (recording && updatedAtMs && Date.now() - updatedAtMs > STALE_STATE_MS) {
       recording = false;
       startedAtMs = null;
       level = 0;
     }
 
     this._levelTarget = level;
-    this._loadTrayState();
 
     if (recording) {
       this._showOverlay(startedAtMs);

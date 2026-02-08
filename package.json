@@ -1,6 +1,6 @@
 {
   "name": "whispr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,8 +21,10 @@
     "vite": "^5.4.2"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "^2.0.0",
-    "@tauri-apps/plugin-global-shortcut": "^2.0.0"
+    "@tauri-apps/api": "~2.8.0",
+    "@tauri-apps/plugin-dialog": "~2.4.0",
+    "@tauri-apps/plugin-updater": "~2.9.0",
+    "@tauri-apps/plugin-process": "~2.3.0",
+    "@tauri-apps/plugin-global-shortcut": "~2.3.0"
   }
 }

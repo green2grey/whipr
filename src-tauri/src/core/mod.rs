@@ -1,7 +1,7 @@
 pub mod audio;
 pub mod audio_import;
-pub mod autostart;
 pub mod automation;
+pub mod autostart;
 pub mod embedding;
 #[allow(dead_code)]
 pub mod hotkeys;

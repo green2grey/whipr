@@ -1,6 +1,6 @@
 [package]
 name = "whispr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Whispr Linux alternative"
 authors = ["greenuni"]
 edition = "2021"
@@ -24,6 +24,9 @@ whisper-rs = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
 hound = "3.5"
+log = "0.4"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.9"
