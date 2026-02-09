@@ -86,6 +86,7 @@ pub struct UiSettings {
     pub list_compact: bool,
     pub onboarding_seen: bool,
     pub live_preview_enabled: bool,
+    pub recording_hud_enabled: bool,
 }
 
 fn default_data_dir_path() -> PathBuf {
@@ -149,9 +150,10 @@ impl Default for Settings {
                 vad_resume_ms: 200,
             },
             hotkeys: HotkeySettings {
-                record_toggle: "CmdOrCtrl+Alt+Space".to_string(),
-                paste_last: "CmdOrCtrl+Alt+V".to_string(),
-                open_app: "CmdOrCtrl+Alt+O".to_string(),
+                // Avoid macOS reserved Option+Command+Space (Spotlight / Finder search).
+                record_toggle: "CommandOrControl+Shift+Space".to_string(),
+                paste_last: "CommandOrControl+Alt+V".to_string(),
+                open_app: "CommandOrControl+Alt+O".to_string(),
             },
             transcription: TranscriptionSettings {
                 model: "small.en".to_string(),
@@ -183,6 +185,7 @@ impl Default for Settings {
                 list_compact: false,
                 onboarding_seen: false,
                 live_preview_enabled: true,
+                recording_hud_enabled: true,
             },
         }
     }

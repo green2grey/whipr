@@ -74,15 +74,12 @@ pub fn decode_audio_file(path: &Path) -> Result<ImportedAudio, String> {
             Err(err) => return Err(err.to_string()),
         };
 
-        match decoded {
-            buf => {
-                sample_rate = buf.spec().rate;
-                channels = buf.spec().channels.count();
-                let mut sample_buf = SampleBuffer::<f32>::new(buf.capacity() as u64, *buf.spec());
-                sample_buf.copy_interleaved_ref(buf);
-                samples.extend_from_slice(sample_buf.samples());
-            }
-        }
+        let buf = decoded;
+        sample_rate = buf.spec().rate;
+        channels = buf.spec().channels.count();
+        let mut sample_buf = SampleBuffer::<f32>::new(buf.capacity() as u64, *buf.spec());
+        sample_buf.copy_interleaved_ref(buf);
+        samples.extend_from_slice(sample_buf.samples());
     }
 
     if samples.is_empty() {

@@ -205,6 +205,24 @@ pub fn transcribe(settings: &Settings, audio: RecordedAudio) -> Result<String, S
     })
 }
 
+/// Ensure the global Whisper context cache is initialized for the current settings.
+///
+/// On GPU builds (Metal/CUDA/etc), the first context initialization can be noticeably slow due to
+/// backend setup and model loading. Calling this in a background thread (for example, when
+/// recording starts) shifts that cost away from the "stop recording -> transcribe" hot path.
+pub fn ensure_context(settings: &Settings) -> Result<(), String> {
+    with_cached_context(settings, |_ctx| Ok(()))
+}
+
+/// Best-effort preview transcription using the shared cached context.
+///
+/// This avoids loading the model a second time for preview vs. final transcription.
+pub fn transcribe_preview(settings: &Settings, audio: RecordedAudio) -> Result<String, String> {
+    with_cached_context(settings, |ctx| {
+        transcribe_preview_with_context(ctx, settings, audio)
+    })
+}
+
 pub fn transcribe_preview_with_context(
     ctx: &WhisperContext,
     settings: &Settings,
@@ -212,21 +230,6 @@ pub fn transcribe_preview_with_context(
 ) -> Result<String, String> {
     let audio = trim_audio(audio, PREVIEW_MAX_SECONDS);
     transcribe_with_context(ctx, settings, audio, Some(1))
-}
-
-pub fn build_context(settings: &Settings) -> Result<WhisperContext, String> {
-    let model_path = models::resolve_model_path(settings, &settings.transcription.model)?;
-    let model_path = model_path
-        .to_str()
-        .ok_or_else(|| "Model path is not valid UTF-8".to_string())?
-        .to_string();
-    let gpu_supported = cfg!(feature = "_gpu");
-    let wants_gpu = settings.transcription.use_gpu && gpu_supported;
-
-    let (ctx, _used_gpu) = build_with_fallback(wants_gpu, |use_gpu| {
-        build_context_with_params(&model_path, use_gpu)
-    })?;
-    Ok(ctx)
 }
 
 pub fn last_gpu_error() -> Option<String> {
@@ -289,7 +292,7 @@ where
     // If GPU init failed earlier, we cache the CPU context under the wants_gpu=true key to avoid
     // retrying GPU on every transcription. Users can retry by toggling GPU (which should invalidate).
     if let Some(cached) = guard.as_ref() {
-        if cached.used_gpu == false && wants_gpu {
+        if !cached.used_gpu && wants_gpu {
             // Keep last GPU error visible; nothing to do here.
         }
     }

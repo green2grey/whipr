@@ -30,7 +30,7 @@ fn encode_tags(tags: &[String]) -> Result<Option<String>, String> {
 fn encode_embedding(embedding: &Option<Vec<f32>>) -> Result<Option<String>, String> {
     embedding
         .as_ref()
-        .map(|vector| serde_json::to_string(vector))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|err| err.to_string())
 }
@@ -167,14 +167,12 @@ fn ensure_transcript_columns(conn: &Connection) -> Result<(), String> {
         .prepare("PRAGMA table_info(transcripts)")
         .map_err(|err| err.to_string())?;
     let rows = stmt
-        .query_map([], |row| Ok(row.get::<_, String>(1)?))
+        .query_map([], |row| row.get::<_, String>(1))
         .map_err(|err| err.to_string())?;
 
     let mut columns = HashSet::new();
-    for row in rows {
-        if let Ok(name) = row {
-            columns.insert(name);
-        }
+    for name in rows.flatten() {
+        columns.insert(name);
     }
 
     let add_column = |name: &str, decl: &str| -> Result<(), String> {
@@ -282,6 +280,10 @@ fn settings_entries(settings: &Settings) -> Vec<(&'static str, Value)> {
             "ui.live_preview_enabled",
             json!(settings.ui.live_preview_enabled),
         ),
+        (
+            "ui.recording_hud_enabled",
+            json!(settings.ui.recording_hud_enabled),
+        ),
     ]
 }
 
@@ -327,6 +329,7 @@ fn apply_setting(settings: &mut Settings, key: &str, value: Value) {
         "ui.list_compact" => assign(&mut settings.ui.list_compact, value),
         "ui.onboarding_seen" => assign(&mut settings.ui.onboarding_seen, value),
         "ui.live_preview_enabled" => assign(&mut settings.ui.live_preview_enabled, value),
+        "ui.recording_hud_enabled" => assign(&mut settings.ui.recording_hud_enabled, value),
         _ => {}
     }
 }
@@ -454,7 +457,7 @@ fn save_transcripts_to_conn(
             let embedding = transcript
                 .embedding
                 .as_ref()
-                .map(|vector| serde_json::to_string(vector))
+                .map(serde_json::to_string)
                 .transpose()
                 .map_err(|err| err.to_string())?;
 
@@ -555,10 +558,8 @@ pub fn load_transcripts(settings: &Settings) -> Vec<Transcript> {
     };
 
     let mut transcripts = Vec::new();
-    for row in rows {
-        if let Ok(transcript) = row {
-            transcripts.push(transcript);
-        }
+    for transcript in rows.flatten() {
+        transcripts.push(transcript);
     }
 
     transcripts
@@ -598,10 +599,8 @@ pub fn load_clips(settings: &Settings) -> Vec<Clip> {
     };
 
     let mut clips = Vec::new();
-    for row in rows {
-        if let Ok(clip) = row {
-            clips.push(clip);
-        }
+    for clip in rows.flatten() {
+        clips.push(clip);
     }
 
     clips

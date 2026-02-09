@@ -7,17 +7,44 @@ export type HotkeyHandlers = {
   onPasteLast: () => Promise<void>;
 };
 
-const modifierKeys = new Set(['CmdOrCtrl', 'CommandOrControl', 'Cmd', 'Ctrl', 'Control', 'Alt', 'Shift']);
+// Keep this list generous: we validate before normalization, and users may have older saved values.
+const modifierKeys = new Set([
+  'CommandOrControl',
+  'CmdOrControl',
+  'CmdOrCtrl',
+  'Command',
+  'Cmd',
+  'Control',
+  'Ctrl',
+  'Alt',
+  'Option',
+  'Shift',
+  'Meta',
+]);
 
-const normalizeHotkey = (value: string) =>
+const normalizeModifier = (value: string) => {
+  const normalized = value.trim();
+  const lower = normalized.toLowerCase();
+
+  // Tauri global shortcut plugin expects CommandOrControl / CmdOrControl (not CmdOrCtrl).
+  if (lower === 'cmdorctrl' || lower === 'cmdorcontrol' || lower === 'commandorcontrol') {
+    return 'CommandOrControl';
+  }
+
+  if (lower === 'cmd' || lower === 'command' || lower === 'meta') return 'Command';
+  if (lower === 'ctrl' || lower === 'control') return 'Control';
+  if (lower === 'option') return 'Alt';
+
+  return normalized;
+};
+
+export const normalizeHotkeyString = (value: string) =>
   value
     .split('+')
     .map((part) => {
       const normalized = part.trim();
-      if (normalized.toLowerCase() === 'ctrl' || normalized.toLowerCase() === 'control') {
-        return 'CmdOrCtrl';
-      }
-      return normalized;
+      if (!normalized) return '';
+      return normalizeModifier(normalized);
     })
     .filter(Boolean)
     .join('+');
@@ -29,9 +56,9 @@ const hasNonModifier = (value: string) => {
 
 export const validateHotkeys = (settings: Settings): string | null => {
   const entries: Array<[string, string]> = [
-    ['Record toggle', normalizeHotkey(settings.hotkeys.record_toggle)],
-    ['Paste last', normalizeHotkey(settings.hotkeys.paste_last)],
-    ['Open app', normalizeHotkey(settings.hotkeys.open_app)],
+    ['Record toggle', normalizeHotkeyString(settings.hotkeys.record_toggle)],
+    ['Paste last', normalizeHotkeyString(settings.hotkeys.paste_last)],
+    ['Open app', normalizeHotkeyString(settings.hotkeys.open_app)],
   ];
 
   for (const [label, combo] of entries) {
@@ -66,17 +93,17 @@ export const registerHotkeys = async (settings: Settings, handlers: HotkeyHandle
 
   await unregisterAll();
 
-  await register(normalizeHotkey(settings.hotkeys.record_toggle), async (event) => {
+  await register(normalizeHotkeyString(settings.hotkeys.record_toggle), async (event) => {
     if (event.state !== 'Pressed') return;
     await handlers.onToggle();
   });
 
-  await register(normalizeHotkey(settings.hotkeys.paste_last), async (event) => {
+  await register(normalizeHotkeyString(settings.hotkeys.paste_last), async (event) => {
     if (event.state !== 'Pressed') return;
     await handlers.onPasteLast();
   });
 
-  await register(normalizeHotkey(settings.hotkeys.open_app), async (event) => {
+  await register(normalizeHotkeyString(settings.hotkeys.open_app), async (event) => {
     if (event.state !== 'Pressed') return;
     const window = getCurrentWindow();
     await window.show();

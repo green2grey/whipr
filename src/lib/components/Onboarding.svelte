@@ -1,6 +1,16 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import type { AudioDevice, RuntimeInfo, Settings } from '../api';
+  import {
+    getMacosPermissions,
+    openMacosPermissionSettings,
+    requestMacosAccessibilityPermission,
+    requestMacosInputMonitoringPermission,
+    type AudioDevice,
+    type MacosPermissions,
+    type RuntimeInfo,
+    type Settings,
+  } from '../api';
+  import { relaunch } from '@tauri-apps/plugin-process';
   import HotkeyInput from './HotkeyInput.svelte';
   import { onboardingSteps as steps } from '../onboarding';
 
@@ -35,15 +45,36 @@
   let initializedStep: number | null = null;
 
   let selectedInputDeviceId = 'default';
-  let recordHotkey = 'Ctrl+Alt+Space';
-  let pasteHotkey = 'Ctrl+Alt+V';
-  let openHotkey = 'Ctrl+Alt+O';
+  let recordHotkey = 'CommandOrControl+Shift+Space';
+  let pasteHotkey = 'CommandOrControl+Alt+V';
+  let openHotkey = 'CommandOrControl+Alt+O';
 
   let autoPasteEnabled = false;
   let copyToClipboard = true;
   let preserveClipboard = false;
   let pasteDelayMs = 0;
   let pasteMethod = 'auto';
+
+  let macosPermissions: MacosPermissions | null = null;
+  let macosPermissionsError = '';
+  let macosPermissionsLoading = false;
+
+  const refreshMacosPermissions = async () => {
+    if (runtimeInfo?.session_type !== 'macos') return;
+    macosPermissionsLoading = true;
+    macosPermissionsError = '';
+    try {
+      macosPermissions = await getMacosPermissions();
+    } catch (err) {
+      macosPermissionsError = err instanceof Error ? err.message : 'Failed to read macOS permissions.';
+    } finally {
+      macosPermissionsLoading = false;
+    }
+  };
+
+  $: if (open && step === 3 && runtimeInfo?.session_type === 'macos' && macosPermissions === null) {
+    refreshMacosPermissions();
+  }
 
   const handleAudioDeviceSelectChange = () => {
     // Avoid dispatching bogus values when no devices have been detected yet.
@@ -211,7 +242,11 @@
                       <label for="onboard-record-hotkey">Record toggle</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="onboard-record-hotkey" bind:value={recordHotkey} />
+                      <HotkeyInput
+                        id="onboard-record-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={recordHotkey}
+                      />
                     </div>
                   </div>
                   <div class="settings-row">
@@ -219,7 +254,11 @@
                       <label for="onboard-paste-hotkey">Paste last</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="onboard-paste-hotkey" bind:value={pasteHotkey} />
+                      <HotkeyInput
+                        id="onboard-paste-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={pasteHotkey}
+                      />
                     </div>
                   </div>
                   <div class="settings-row">
@@ -227,7 +266,11 @@
                       <label for="onboard-open-hotkey">Open app</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="onboard-open-hotkey" bind:value={openHotkey} />
+                      <HotkeyInput
+                        id="onboard-open-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={openHotkey}
+                      />
                     </div>
                   </div>
                 </div>
@@ -237,6 +280,13 @@
                     <p>Wayland limits hotkeys and paste helpers on some systems.</p>
                   {:else if runtimeInfo?.session_type === 'windows'}
                     <p>Windows tray supports click‑to‑record and quick access.</p>
+                  {:else if runtimeInfo?.session_type === 'macos'}
+                    <p>
+                      On macOS, <code class="code-hint">CommandOrControl</code> means <strong>Cmd</strong>. If you
+                      want <strong>Ctrl</strong> explicitly, bind a hotkey that starts with <code class="code-hint"
+                        >Control</code
+                      >.
+                    </p>
                   {:else}
                     <p>Shortcuts work best on X11 and Windows.</p>
                   {/if}
@@ -319,14 +369,120 @@
                     </div>
                   </div>
                 </div>
-                <div class="onboard-example">
-                  <p class="onboard-example-title">Quick workflow</p>
-                  <ol>
-                    <li>Record</li>
-                    <li>Preview</li>
-                    <li>Copy or paste</li>
-                  </ol>
-                </div>
+                <aside class="onboard-aside">
+                  <div class="onboard-example onboard-example-compact">
+                    <p class="onboard-example-title">Quick workflow</p>
+                    <div class="onboard-workflow">
+                      <span class="onboard-workflow-step"><span class="onboard-workflow-num">1</span>Record</span>
+                      <span class="onboard-workflow-step"><span class="onboard-workflow-num">2</span>Preview</span>
+                      <span class="onboard-workflow-step"><span class="onboard-workflow-num">3</span>Copy or paste</span>
+                    </div>
+                  </div>
+
+                  {#if runtimeInfo?.session_type === 'macos'}
+                    <div class="onboard-example onboard-example-perms">
+                      <p class="onboard-example-title">macOS permissions</p>
+                      <p class="onboard-example-note">
+                        Auto‑paste uses Accessibility (System Events). Hotkeys do not.
+                      </p>
+
+                      <div class="perm-card">
+                        {#if macosPermissionsError}
+                          <div class="perm-error" role="status">{macosPermissionsError}</div>
+                        {/if}
+
+                        <div class="perm-block">
+                          <div class="perm-row">
+                            <span class="perm-label">Accessibility</span>
+                            <span class={`perm-status ${macosPermissions?.accessibility ? 'ok' : 'bad'}`}>
+                              {#if macosPermissionsLoading}
+                                Checking…
+                              {:else if macosPermissions?.accessibility}
+                                Granted
+                              {:else}
+                                Not granted
+                              {/if}
+                            </span>
+                          </div>
+                          <div class="perm-actions">
+                            <button
+                              class="btn-secondary"
+                              type="button"
+                              disabled={macosPermissionsLoading || !!macosPermissions?.accessibility}
+                              on:click={async () => {
+                                macosPermissions = await requestMacosAccessibilityPermission();
+                              }}
+                            >
+                              Request
+                            </button>
+                            <button
+                              class="btn-secondary"
+                              type="button"
+                              disabled={macosPermissionsLoading}
+                              on:click={() => openMacosPermissionSettings('accessibility')}
+                            >
+                              Open settings
+                            </button>
+                          </div>
+                        </div>
+
+                        <div class="perm-block">
+                          <div class="perm-row">
+                            <span class="perm-label">Input Monitoring</span>
+                            <span class={`perm-status ${macosPermissions?.input_monitoring ? 'ok' : 'bad'}`}>
+                              {#if macosPermissionsLoading}
+                                Checking…
+                              {:else if macosPermissions?.input_monitoring}
+                                Granted
+                              {:else}
+                                Not granted
+                              {/if}
+                            </span>
+                          </div>
+                          <div class="perm-actions">
+                            <button
+                              class="btn-secondary"
+                              type="button"
+                              disabled={macosPermissionsLoading || !!macosPermissions?.input_monitoring}
+                              on:click={async () => {
+                                macosPermissions = await requestMacosInputMonitoringPermission();
+                              }}
+                            >
+                              Request
+                            </button>
+                            <button
+                              class="btn-secondary"
+                              type="button"
+                              disabled={macosPermissionsLoading}
+                              on:click={() => openMacosPermissionSettings('input_monitoring')}
+                            >
+                              Open settings
+                            </button>
+                            <button
+                              class="btn-secondary"
+                              type="button"
+                              disabled={macosPermissionsLoading}
+                              on:click={async () => {
+                                await refreshMacosPermissions();
+                              }}
+                            >
+                              Refresh
+                            </button>
+                          </div>
+                        </div>
+
+                        <div class="perm-footnote">
+                          After enabling permissions in System Settings, relaunch Whispr.
+                        </div>
+                        <div class="perm-actions">
+                          <button class="btn-primary" type="button" on:click={() => relaunch()}>
+                            Relaunch
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  {/if}
+                </aside>
               </div>
             {/if}
           </div>
@@ -357,3 +513,56 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .perm-card {
+    width: 100%;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 12px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .perm-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .perm-label {
+    font-weight: 600;
+  }
+
+  .perm-status {
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+
+  .perm-status.ok {
+    color: #116329;
+  }
+
+  .perm-status.bad {
+    color: #b42318;
+  }
+
+  .perm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .perm-footnote {
+    font-size: 0.85rem;
+    opacity: 0.82;
+  }
+
+  .perm-error {
+    font-size: 0.9rem;
+    color: #b42318;
+  }
+</style>

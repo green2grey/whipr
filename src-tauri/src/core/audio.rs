@@ -29,6 +29,7 @@ pub enum AudioCommand {
     Start(AudioSettings, i64, mpsc::Sender<Result<(), String>>),
     Snapshot(usize, mpsc::Sender<Result<AudioSnapshot, String>>),
     Stats(mpsc::Sender<Result<AudioStats, String>>),
+    Level(mpsc::Sender<Result<f32, String>>),
     Stop(mpsc::Sender<Result<RecordedAudio, String>>),
 }
 
@@ -79,6 +80,14 @@ pub fn start_worker() -> mpsc::Sender<AudioCommand> {
                         let _ = reply.send(Err("No active recorder found".to_string()));
                     }
                 },
+                AudioCommand::Level(reply) => match recorder.as_ref() {
+                    Some(active) => {
+                        let _ = reply.send(Ok(active.level()));
+                    }
+                    None => {
+                        let _ = reply.send(Err("No active recorder found".to_string()));
+                    }
+                },
             }
         }
     });
@@ -122,6 +131,15 @@ pub fn snapshot_audio(
 pub fn stats(tx: &mpsc::Sender<AudioCommand>) -> Result<AudioStats, String> {
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(AudioCommand::Stats(reply_tx))
+        .map_err(|_| "Audio worker unavailable".to_string())?;
+    reply_rx
+        .recv()
+        .map_err(|_| "Audio worker unavailable".to_string())?
+}
+
+pub fn recording_level(tx: &mpsc::Sender<AudioCommand>) -> Result<f32, String> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.send(AudioCommand::Level(reply_tx))
         .map_err(|_| "Audio worker unavailable".to_string())?;
     reply_rx
         .recv()
@@ -317,6 +335,7 @@ pub struct Recorder {
     meter_stop: Arc<AtomicBool>,
     meter_thread: Option<thread::JoinHandle<()>>,
     active: Arc<AtomicBool>,
+    level: Arc<AtomicU16>,
 }
 
 #[derive(Clone)]
@@ -623,6 +642,7 @@ impl Recorder {
             meter_stop,
             meter_thread: Some(meter_thread),
             active,
+            level,
         })
     }
 
@@ -659,6 +679,11 @@ impl Recorder {
             sample_rate: self.sample_rate,
             channels: self.channels,
         }
+    }
+
+    pub fn level(&self) -> f32 {
+        let raw = self.level.load(Ordering::Relaxed) as f32;
+        (raw / 1000.0).clamp(0.0, 1.0)
     }
 }
 

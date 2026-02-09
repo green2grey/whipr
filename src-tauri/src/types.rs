@@ -82,6 +82,12 @@ pub struct RuntimeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacosPermissions {
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStats {
     pub data_bytes: u64,
     pub model_bytes: u64,

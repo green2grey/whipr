@@ -5763,6 +5763,7 @@ dependencies = [
  "alsa",
  "alsa-sys",
  "arboard",
+ "core-foundation 0.10.1",
  "cpal",
  "enigo",
  "hound",
