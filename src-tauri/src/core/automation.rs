@@ -3,7 +3,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(not(target_os = "macos"))]
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{Enigo, Key, KeyboardControllable};
 
 use crate::core::runtime::{self, HelperAvailability, PasteMethod, SessionType};
@@ -116,10 +118,11 @@ pub fn paste_text(
             } else {
                 format!("Missing helpers: {}", resolution.missing_helpers.join(", "))
             };
-            if use_clipboard && !preserve_clipboard {
-                if paste_clipboard_only(text, &previous_clipboard, session, &helpers).is_ok() {
-                    return Ok(());
-                }
+            if use_clipboard
+                && !preserve_clipboard
+                && paste_clipboard_only(text, &previous_clipboard, session, &helpers).is_ok()
+            {
+                return Ok(());
             }
             Err(detail)
         }
@@ -228,7 +231,21 @@ fn resolve_wayland_type_helper(
         "clipboard_only" => {
             Err("Clipboard-only paste is disabled when copy-to-clipboard is off".to_string())
         }
-        "x11_ctrl_v" | "auto" | _ => {
+        "x11_ctrl_v" | "auto" => {
+            if helpers.wtype {
+                Ok(WaylandPasteHelper::Wtype)
+            } else if helpers.ydotool {
+                Ok(WaylandPasteHelper::Ydotool)
+            } else {
+                let ydotool_missing = if helpers.ydotool_bin {
+                    "ydotoold"
+                } else {
+                    "ydotool"
+                };
+                Err(format!("Missing helpers: wtype, {ydotool_missing}"))
+            }
+        }
+        _ => {
             if helpers.wtype {
                 Ok(WaylandPasteHelper::Wtype)
             } else if helpers.ydotool {
@@ -250,9 +267,17 @@ fn type_x11(text: &str, delay_ms: u32) -> Result<(), String> {
         thread::sleep(Duration::from_millis(delay_ms as u64));
     }
 
-    let mut enigo = Enigo::new();
-    enigo.key_sequence(text);
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        macos_keystroke_text(text)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut enigo = Enigo::new();
+        enigo.key_sequence(text);
+        Ok(())
+    }
 }
 
 fn type_wayland(text: &str, delay_ms: u32, helper: WaylandPasteHelper) -> Result<(), String> {
@@ -272,26 +297,33 @@ fn paste_x11(
     previous_clipboard: &Option<String>,
     clipboard_restore_delay_ms: u64,
 ) -> Result<(), String> {
-    let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
-
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|err| err.to_string())?;
+    set_clipboard_text(text)?;
 
     if delay_ms > 0 {
         thread::sleep(Duration::from_millis(delay_ms as u64));
     }
 
-    let mut enigo = Enigo::new();
-    let modifier = paste_modifier_key();
-    enigo.key_down(modifier);
-    enigo.key_click(Key::Layout('v'));
-    enigo.key_up(modifier);
+    #[cfg(target_os = "macos")]
+    {
+        // Avoid Enigo on macOS: its keyboard layout probing calls HIToolbox APIs that assert
+        // when invoked off the main dispatch queue, which is common for our background
+        // automation thread.
+        macos_cmd_v()?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut enigo = Enigo::new();
+        let modifier = paste_modifier_key();
+        enigo.key_down(modifier);
+        enigo.key_click(Key::Layout('v'));
+        enigo.key_up(modifier);
+    }
 
     if let Some(previous_text) = previous_clipboard.as_deref() {
         // Give the target app a moment to consume the clipboard on paste before restoring.
         thread::sleep(Duration::from_millis(clipboard_restore_delay_ms));
-        if let Err(err) = clipboard.set_text(previous_text.to_string()) {
+        if let Err(err) = set_clipboard_text(previous_text) {
             return Err(format!(
                 "Failed to restore clipboard (previous_clipboard restore path) after {clipboard_restore_delay_ms}ms: {err}"
             ));
@@ -396,10 +428,37 @@ fn paste_clipboard_only(
 }
 
 fn set_clipboard_text(text: &str) -> Result<(), String> {
-    let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|err| err.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        // Prefer pbcopy on macOS to avoid main-thread-only clipboard APIs.
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| "Failed to open pbcopy stdin".to_string())?;
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|err| err.to_string())?;
+        }
+        let status = child.wait().map_err(|err| err.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("pbcopy failed with status {status}"))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
+        clipboard
+            .set_text(text.to_string())
+            .map_err(|err| err.to_string())
+    }
 }
 
 fn capture_clipboard_text_for_restore(
@@ -414,8 +473,23 @@ fn capture_clipboard_text_for_restore(
         return wl_paste_text();
     }
 
-    let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
-    clipboard.get_text().map_err(|err| err.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("pbpaste")
+            .output()
+            .map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            return Err(format!("pbpaste failed with status {}", output.status));
+        }
+        // pbpaste already outputs UTF-8 on modern macOS; surface decode errors explicitly.
+        String::from_utf8(output.stdout).map_err(|err| err.to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
+        clipboard.get_text().map_err(|err| err.to_string())
+    }
 }
 
 fn wl_copy_text(text: &str) -> Result<(), String> {
@@ -515,15 +589,61 @@ fn send_ydotool_text(text: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn paste_modifier_key() -> Key {
-    #[cfg(target_os = "macos")]
-    {
-        Key::Meta
+    Key::Control
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cmd_v() -> Result<(), String> {
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to keystroke \"v\" using command down",
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "osascript Cmd+V failed (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keystroke_text(text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        Key::Control
+    // Pass text as argv to avoid quoting/escaping pitfalls in AppleScript.
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "tell application \"System Events\" to keystroke (item 1 of argv)",
+            "-e",
+            "end run",
+            "--",
+            text,
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "osascript keystroke failed (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 

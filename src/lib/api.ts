@@ -47,6 +47,7 @@ export type Settings = {
     list_compact: boolean;
     onboarding_seen: boolean;
     live_preview_enabled: boolean;
+    recording_hud_enabled: boolean;
   };
 };
 
@@ -93,6 +94,11 @@ export type RuntimeInfo = {
   hotkeys_supported: boolean;
   paste_method: string;
   missing_helpers: string[];
+};
+
+export type MacosPermissions = {
+  accessibility: boolean;
+  input_monitoring: boolean;
 };
 
 export type StorageStats = {
@@ -144,8 +150,8 @@ export const getSettings = () => invoke<Settings>('get_settings');
 export const setUiActive = (active: boolean) => invoke<boolean>('set_ui_active', { active });
 export const saveSettings = (settings: Settings) => invoke<Settings>('save_settings', { settings });
 export const setAudioInputDevice = (inputDeviceId: string) =>
-  // Command arg keys must match the Rust parameter names.
-  invoke<Settings>('set_audio_input_device', { input_device_id: inputDeviceId });
+  // Tauri v2 maps Rust snake_case params (e.g. `input_device_id`) to camelCase JS keys.
+  invoke<Settings>('set_audio_input_device', { inputDeviceId });
 
 export const listTranscripts = () => invoke<Transcript[]>('list_transcripts');
 export const searchTranscripts = (query: string, limit?: number) =>
@@ -159,25 +165,35 @@ export const clearTranscripts = () => invoke<boolean>('clear_transcripts');
 export const importAudioFiles = (paths: string[]) =>
   invoke<ImportResult>('import_audio_files', { paths });
 export const getRuntimeInfo = () => invoke<RuntimeInfo>('get_runtime_info');
+export const getMacosPermissions = () => invoke<MacosPermissions>('get_macos_permissions');
+export const requestMacosAccessibilityPermission = () =>
+  invoke<MacosPermissions>('request_macos_accessibility_permission');
+export const requestMacosInputMonitoringPermission = () =>
+  invoke<MacosPermissions>('request_macos_input_monitoring_permission');
+export const openMacosPermissionSettings = (permission: 'accessibility' | 'input_monitoring') =>
+  invoke<boolean>('open_macos_permission_settings', { permission });
 export const getPerformanceInfo = () => invoke<PerformanceInfo>('get_performance_info');
 export const benchmarkTranscription = (path: string) =>
   invoke<BenchmarkResult>('benchmark_transcription', { path });
 export const listAudioDevices = () => invoke<AudioDevice[]>('list_audio_devices');
 export const toggleRecording = () => invoke<ToggleResult>('toggle_recording');
+export const getRecordingLevel = () => invoke<number | null>('get_recording_level');
+export const getRecordingState = () =>
+  invoke<{ recording: boolean; started_at_ms: number | null; hud_enabled: boolean }>('get_recording_state');
 export const pasteLastTranscript = () => invoke<boolean>('paste_last_transcript');
 export const copyText = (text: string) => invoke<boolean>('copy_text', { text });
 export const checkForUpdates = () => invoke<UpdateInfo | null>('check_for_updates');
 export const getStorageStats = () => invoke<StorageStats>('get_storage_stats');
 export const listClips = () => invoke<Clip[]>('list_clips');
 export const createClip = (title: string, text: string, transcriptId?: string | null) =>
-  invoke<Clip>('create_clip', { title, text, transcript_id: transcriptId });
+  invoke<Clip>('create_clip', { title, text, transcriptId });
 export const deleteClip = (id: string) => invoke<boolean>('delete_clip', { id });
 
 export const listModels = () => invoke<ModelInfo[]>('list_models');
 export const downloadModel = (modelId: string) =>
-  invoke<ModelInfo[]>('download_model', { model_id: modelId });
+  invoke<ModelInfo[]>('download_model', { modelId });
 export const deleteModel = (modelId: string) =>
-  invoke<ModelInfo[]>('delete_model', { model_id: modelId });
+  invoke<ModelInfo[]>('delete_model', { modelId });
 export const activateModel = (modelId: string) =>
-  invoke<ModelInfo[]>('activate_model', { model_id: modelId });
+  invoke<ModelInfo[]>('activate_model', { modelId });
 export const cycleModel = () => invoke<ModelInfo[]>('cycle_model');

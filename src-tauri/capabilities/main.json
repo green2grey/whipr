@@ -1,11 +1,15 @@
 {
   "identifier": "main",
   "description": "Main window permissions for core IPC and global shortcuts.",
-  "windows": ["main"],
+  "windows": ["main", "recording_hud"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
+    "core:window:allow-hide",
     "core:window:allow-minimize",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
     "dialog:allow-open",

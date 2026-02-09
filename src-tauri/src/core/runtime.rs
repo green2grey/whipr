@@ -188,10 +188,12 @@ pub fn runtime_info(
     };
 
     // Preserving clipboard on Wayland requires wl-paste (in addition to wl-copy).
-    if preserve_clipboard && session == SessionType::Wayland && !helpers.wl_paste {
-        if !resolution.missing_helpers.iter().any(|h| h == "wl-paste") {
-            resolution.missing_helpers.push("wl-paste".to_string());
-        }
+    if preserve_clipboard
+        && session == SessionType::Wayland
+        && !helpers.wl_paste
+        && !resolution.missing_helpers.iter().any(|h| h == "wl-paste")
+    {
+        resolution.missing_helpers.push("wl-paste".to_string());
     }
 
     RuntimeInfo {
@@ -274,7 +276,32 @@ fn resolve_wayland_no_clipboard(requested: &str, helpers: &HelperAvailability) -
             method: PasteMethod::Unavailable,
             missing_helpers: vec!["wtype".to_string(), "ydotool".to_string()],
         },
-        "x11_ctrl_v" | "auto" | _ => {
+        "x11_ctrl_v" | "auto" => {
+            if helpers.wtype {
+                PasteResolution {
+                    method: PasteMethod::WaylandWtype,
+                    missing_helpers: Vec::new(),
+                }
+            } else if helpers.ydotool {
+                PasteResolution {
+                    method: PasteMethod::WaylandYdotool,
+                    missing_helpers: Vec::new(),
+                }
+            } else {
+                PasteResolution {
+                    method: PasteMethod::Unavailable,
+                    missing_helpers: vec![
+                        "wtype".to_string(),
+                        if helpers.ydotool_bin {
+                            "ydotoold".to_string()
+                        } else {
+                            "ydotool".to_string()
+                        },
+                    ],
+                }
+            }
+        }
+        _ => {
             if helpers.wtype {
                 PasteResolution {
                     method: PasteMethod::WaylandWtype,

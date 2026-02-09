@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod embedding;
 #[allow(dead_code)]
 pub mod hotkeys;
+pub mod macos_permissions;
 pub mod models;
 pub mod runtime;
 pub mod storage;

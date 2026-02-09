@@ -13,16 +13,16 @@ use uuid::Uuid;
 use crate::app_tray;
 use crate::core::audio::AudioDevice;
 use crate::core::{
-    audio, audio_import, automation, autostart, embedding, models, runtime, storage, summary,
-    transcription,
+    audio, audio_import, automation, autostart, embedding, macos_permissions, models, runtime,
+    storage, summary, transcription,
 };
 use crate::overlay;
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::tray;
 use crate::types::{
-    BenchmarkResult, Clip, ImportFailure, ImportResult, ModelInfo, PerformanceInfo, RuntimeInfo,
-    StorageStats, ToggleResult, Transcript, UpdateInfo,
+    BenchmarkResult, Clip, ImportFailure, ImportResult, MacosPermissions, ModelInfo,
+    PerformanceInfo, RuntimeInfo, StorageStats, ToggleResult, Transcript, UpdateInfo,
 };
 struct ToggleOutcome {
     result: ToggleResult,
@@ -129,10 +129,10 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
     };
 
     std::thread::spawn(move || {
-        let ctx = match transcription::build_context(&settings) {
-            Ok(ctx) => ctx,
-            Err(_) => return,
-        };
+        // Warm up the shared context cache so the "stop recording -> transcribe" path doesn't
+        // pay model load / backend init costs (especially noticeable with Metal).
+        let _ = transcription::ensure_context(&settings);
+
         let mut cursor = 0_usize;
         let mut preview = String::new();
         let wants_gpu = settings.transcription.use_gpu && cfg!(feature = "_gpu");
@@ -190,8 +190,12 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
                 channels: snapshot.channels,
             };
 
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+
             let started = Instant::now();
-            match transcription::transcribe_preview_with_context(&ctx, &settings, audio) {
+            match transcription::transcribe_preview(&settings, audio) {
                 Ok(chunk) => {
                     let chunk = chunk.trim();
                     if !chunk.is_empty() {
@@ -381,6 +385,23 @@ pub fn save_settings(
     }
 
     app_tray::refresh_tray(&app, state.inner());
+
+    // Apply HUD visibility immediately when the user toggles it.
+    if let Some(window) = app.get_webview_window("recording_hud") {
+        let (recording, hud_enabled) = state
+            .inner()
+            .lock()
+            .ok()
+            .map(|guard| (guard.recording, guard.settings.ui.recording_hud_enabled))
+            .unwrap_or((false, true));
+
+        if recording && hud_enabled {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
+    }
+
     let _ = app.emit("settings-updated", settings.clone());
     Ok(settings)
 }
@@ -768,6 +789,38 @@ pub fn get_runtime_info(state: State<'_, Mutex<AppState>>) -> RuntimeInfo {
 }
 
 #[tauri::command]
+pub fn get_macos_permissions() -> MacosPermissions {
+    MacosPermissions {
+        accessibility: macos_permissions::accessibility_enabled(),
+        input_monitoring: macos_permissions::input_monitoring_enabled(),
+    }
+}
+
+#[tauri::command]
+pub fn request_macos_accessibility_permission() -> MacosPermissions {
+    let _ = macos_permissions::request_accessibility_prompt();
+    MacosPermissions {
+        accessibility: macos_permissions::accessibility_enabled(),
+        input_monitoring: macos_permissions::input_monitoring_enabled(),
+    }
+}
+
+#[tauri::command]
+pub fn request_macos_input_monitoring_permission() -> MacosPermissions {
+    let _ = macos_permissions::request_input_monitoring_prompt();
+    MacosPermissions {
+        accessibility: macos_permissions::accessibility_enabled(),
+        input_monitoring: macos_permissions::input_monitoring_enabled(),
+    }
+}
+
+#[tauri::command]
+pub fn open_macos_permission_settings(permission: String) -> Result<bool, String> {
+    macos_permissions::open_privacy_settings(&permission)?;
+    Ok(true)
+}
+
+#[tauri::command]
 pub fn get_performance_info(state: State<'_, Mutex<AppState>>) -> PerformanceInfo {
     let settings = state
         .lock()
@@ -943,6 +996,7 @@ fn toggle_recording_with_state(
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
         guard.recording = true;
+        guard.recording_started_at_ms = Some(started_at_ms);
         drop(guard);
 
         if let Err(err) = audio::start_recording(&audio_tx, audio_settings, started_at_ms) {
@@ -951,16 +1005,25 @@ fn toggle_recording_with_state(
                 .map_err(|_| "state lock poisoned".to_string())?;
             guard.recording = false;
             guard.recording_started_at = None;
+            guard.recording_started_at_ms = None;
             guard.last_focus_window = None;
             let _ = overlay::write_state(false, None, Some(0.0));
             let _ = tray::write_error(&settings_snapshot, &transcripts_snapshot, &err);
             return Err(err);
         }
 
+        // Pre-warm the transcription cache in the background. This removes the worst-case
+        // "hang" when stopping a recording for the first transcription (Metal init + model load).
+        let warm_settings = settings_snapshot.clone();
+        std::thread::spawn(move || {
+            let _ = transcription::ensure_context(&warm_settings);
+        });
+
         let mut guard = state
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
         guard.recording_started_at = Some(std::time::Instant::now());
+        guard.recording_started_at_ms = Some(started_at_ms);
         guard.last_focus_window = automation::capture_focus_window();
         let _ = overlay::write_state(true, Some(started_at_ms), Some(0.0));
         return Ok(ToggleOutcome {
@@ -975,6 +1038,12 @@ fn toggle_recording_with_state(
     }
 
     guard.recording = false;
+    guard.recording_started_at_ms = None;
+    // Stop live preview before running the (potentially expensive) final transcription so we
+    // don't run two Whisper inferences concurrently.
+    if let Some(cancel) = guard.preview_cancel.take() {
+        cancel.store(true, Ordering::Relaxed);
+    }
     let duration_ms = guard
         .recording_started_at
         .take()
@@ -1080,6 +1149,27 @@ pub fn toggle_recording_with_state_and_emit(
         stop_preview_thread(state);
         emit_preview_event(app, String::new());
     }
+
+    // Ensure the HUD window becomes visible as soon as recording starts (if enabled).
+    // Some platforms may not fully initialize a hidden webview until the first show().
+    if let Some(window) = app.get_webview_window("recording_hud") {
+        let hud_enabled = state
+            .lock()
+            .ok()
+            .map(|guard| guard.settings.ui.recording_hud_enabled)
+            .unwrap_or(true);
+
+        if outcome.result.recording && hud_enabled {
+            let _ = window.show();
+        } else {
+            // Let the HUD animate out if it's running; otherwise, best-effort hide.
+            let window = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(260));
+                let _ = window.hide();
+            });
+        }
+    }
     emit_recording_event(app, &outcome);
     emit_transcript_event(app, &outcome.result.transcript);
     app_tray::refresh_tray(app, state);
@@ -1162,6 +1252,42 @@ pub fn paste_last_transcript_with_state(state: &Mutex<AppState>) -> Result<bool,
     }
 
     Ok(false)
+}
+
+#[tauri::command]
+pub fn get_recording_level(state: State<'_, Mutex<AppState>>) -> Result<Option<f32>, String> {
+    let (audio_tx, recording) = {
+        let guard = state
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?;
+        (guard.audio_tx.clone(), guard.recording)
+    };
+
+    if !recording {
+        return Ok(None);
+    }
+
+    let level = audio::recording_level(&audio_tx)?;
+    Ok(Some(level))
+}
+
+#[derive(Clone, Serialize)]
+pub struct RecordingState {
+    pub recording: bool,
+    pub started_at_ms: Option<i64>,
+    pub hud_enabled: bool,
+}
+
+#[tauri::command]
+pub fn get_recording_state(state: State<'_, Mutex<AppState>>) -> Result<RecordingState, String> {
+    let guard = state
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    Ok(RecordingState {
+        recording: guard.recording,
+        started_at_ms: guard.recording_started_at_ms,
+        hud_enabled: guard.settings.ui.recording_hud_enabled,
+    })
 }
 
 #[tauri::command]
@@ -1266,7 +1392,7 @@ fn dir_size(path: &Path) -> u64 {
 
 fn parse_version(version: &str) -> Option<(u32, u32, u32)> {
     let trimmed = version.trim().trim_start_matches('v');
-    let mut parts = trimmed.split(|ch| ch == '.' || ch == '-');
+    let mut parts = trimmed.split(['.', '-']);
     let major = parts.next()?.parse::<u32>().ok()?;
     let minor = parts.next().unwrap_or("0").parse::<u32>().ok()?;
     let patch = parts.next().unwrap_or("0").parse::<u32>().ok()?;

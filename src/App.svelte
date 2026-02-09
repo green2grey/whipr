@@ -45,7 +45,7 @@
     type Transcript,
     type TranscriptUpdate,
   } from './lib/api';
-  import { registerHotkeys, validateHotkeys } from './lib/hotkeys';
+  import { normalizeHotkeyString, registerHotkeys, validateHotkeys } from './lib/hotkeys';
   import { theme, type ThemePreference } from './lib/theme';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
   import EmptyState from './lib/components/EmptyState.svelte';
@@ -232,6 +232,23 @@
       month: 'short',
       day: 'numeric',
       year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
+  const formatRailDate = (ms: number) => {
+    const date = new Date(ms);
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const formatRailTime = (ms: number) => {
+    const date = new Date(ms);
+    return date.toLocaleTimeString('en-US', {
       hour: 'numeric',
       minute: '2-digit',
       hour12: true,
@@ -473,22 +490,31 @@
     searchLoading = false;
   }
 
-    const registerHotkeysSafely = async () => {
-      if (!settings) return;
-      hotkeyWarning = '';
+	    const registerHotkeysSafely = async () => {
+	      if (!settings) return;
+	      hotkeyWarning = '';
 
-      if (runtimeInfo && runtimeInfo.session_type === 'wayland' && !runtimeInfo.hotkeys_supported) {
-        if (!waylandHotkeysWarningDismissed) {
-          hotkeyWarning = WAYLAND_HOTKEYS_WARNING;
+	      if (runtimeInfo && runtimeInfo.session_type === 'wayland' && !runtimeInfo.hotkeys_supported) {
+	        if (!waylandHotkeysWarningDismissed) {
+	          hotkeyWarning = WAYLAND_HOTKEYS_WARNING;
+	        }
+	        return;
+	      }
+
+        if (runtimeInfo?.session_type === 'macos') {
+          const normalized = normalizeHotkeyString(settings.hotkeys.record_toggle);
+          if (normalized === 'CommandOrControl+Alt+Space' || normalized === 'CmdOrControl+Alt+Space') {
+            hotkeyWarning =
+              'Record toggle hotkey conflicts with macOS Spotlight/Finder search (Option+Command+Space). Pick a different hotkey (example: CommandOrControl+Shift+Space).';
+            return;
+          }
         }
-        return;
-      }
 
-    try {
-      await registerHotkeys(settings, {
-        onToggle: handleToggleRecording,
-        onPasteLast: handlePasteLast,
-      });
+	    try {
+	      await registerHotkeys(settings, {
+	        onToggle: handleToggleRecording,
+	        onPasteLast: handlePasteLast,
+	      });
       } catch (error) {
         hotkeyWarning = error instanceof Error ? error.message : 'Failed to register hotkeys.';
       }
@@ -1599,36 +1625,57 @@
               </div>
             {/if}
 
-            <div class="home-toolbar">
-              <div class={`status-pill ${isRecording ? 'recording' : ''}`} role="status" aria-live="polite">
-                <span class="status-dot"></span>
-                <span>{statusLabel}</span>
+            <div class="home-header">
+              <div class="home-header-left">
+                <h1 class="home-title">Recent</h1>
+                <div class={`status-pill ${isRecording ? 'recording' : ''}`} role="status" aria-live="polite">
+                  <span class="status-dot"></span>
+                  <span>{statusLabel}</span>
+                </div>
               </div>
-              <div class="toolbar-actions">
+              <div class="home-header-right">
+                <div class="toolbar-actions">
+                  <button
+                    class="btn-tertiary"
+                    type="button"
+                    on:click={handlePasteLast}
+                    disabled={pasteUnavailable || transcripts.length === 0}
+                    title={pasteUnavailable ? 'Paste unavailable' : ''}
+                  >
+                    {pasteActionLabel}
+                  </button>
+                  <button
+                    class="btn-secondary"
+                    type="button"
+                    on:click={handleImportAudio}
+                    disabled={importing}
+                  >
+                    {importing ? 'Importing...' : 'Import Audio'}
+                  </button>
+                  <button
+                    class="btn-primary"
+                    type="button"
+                    on:click={handleToggleRecording}
+                    disabled={loading}
+                  >
+                    {isRecording ? 'Stop & Paste' : 'Start Recording'}
+                  </button>
+                </div>
                 <button
-                  class="btn-secondary"
+                  class="icon-button subtle danger"
                   type="button"
-                  on:click={handlePasteLast}
-                  disabled={pasteUnavailable || transcripts.length === 0}
-                  title={pasteUnavailable ? 'Paste unavailable' : ''}
+                  disabled={transcripts.length === 0 || clearingTranscripts}
+                  on:click={() => (clearConfirmOpen = true)}
+                  aria-label="Delete all transcripts"
+                  title="Delete all transcripts"
                 >
-                  {pasteActionLabel}
-                </button>
-                <button
-                  class="btn-secondary"
-                  type="button"
-                  on:click={handleImportAudio}
-                  disabled={importing}
-                >
-                  {importing ? 'Importing...' : 'Import Audio'}
-                </button>
-                <button
-                  class="btn-primary"
-                  type="button"
-                  on:click={handleToggleRecording}
-                  disabled={loading}
-                >
-                  {isRecording ? 'Stop & Paste' : 'Start Recording'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4h8v2" />
+                    <path d="M6 6l1 14h10l1-14" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -1650,25 +1697,6 @@
               </div>
             {/if}
 
-            <div class="recent-header">
-              <h2>Recent</h2>
-              <button
-                class="icon-button danger"
-                type="button"
-                disabled={transcripts.length === 0 || clearingTranscripts}
-                on:click={() => (clearConfirmOpen = true)}
-                aria-label="Delete all transcripts"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 6h18" />
-                  <path d="M8 6V4h8v2" />
-                  <path d="M6 6l1 14h10l1-14" />
-                  <path d="M10 11v6" />
-                  <path d="M14 11v6" />
-                </svg>
-              </button>
-            </div>
-
             <div class="search-row">
               <div class="search-input">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1683,24 +1711,26 @@
                   aria-label="Search transcripts"
                 />
               </div>
-              <button
-                class={`toggle-pill ${semanticSearchEnabled ? 'active' : ''}`}
-                type="button"
-                on:click={() => (semanticSearchEnabled = !semanticSearchEnabled)}
-                aria-pressed={semanticSearchEnabled}
-              >
-                Semantic
-              </button>
-              <select
-                class="select-compact"
-                bind:value={dateFilter}
-                aria-label="Filter transcripts by date"
-              >
-                <option value="all">All time</option>
-                <option value="7d">Last 7 days</option>
-                <option value="30d">Last 30 days</option>
-                <option value="90d">Last 90 days</option>
-              </select>
+              <div class="search-filters" role="group" aria-label="Search filters">
+                <button
+                  class={`toggle-pill ${semanticSearchEnabled ? 'active' : ''}`}
+                  type="button"
+                  on:click={() => (semanticSearchEnabled = !semanticSearchEnabled)}
+                  aria-pressed={semanticSearchEnabled}
+                >
+                  Semantic
+                </button>
+                <select
+                  class="select-compact"
+                  bind:value={dateFilter}
+                  aria-label="Filter transcripts by date"
+                >
+                  <option value="all">All time</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="90d">Last 90 days</option>
+                </select>
+              </div>
             </div>
             {#if semanticSearchEnabled}
               <div class="search-hint">
@@ -1751,15 +1781,19 @@
                     on:click={() => handleCopyTranscript(transcript.id, transcript.text)}
                     on:keydown={(event) => handleCardKeydown(event, transcript)}
                   >
-                    <div class="transcript-meta">
-                      <span>{formatTimestamp(transcript.created_at)}</span>
-                      <span>&bull;</span>
-                      <span>{formatDuration(transcript.duration_ms)}</span>
+                      <div class="transcript-rail" aria-hidden="true">
+                        <div class="transcript-rail-top">
+                        <span class="transcript-date">
+                          <span class="transcript-date-main">{formatRailDate(transcript.created_at)}</span>
+                          <span class="transcript-time">{formatRailTime(transcript.created_at)}</span>
+                        </span>
+                        <span class="transcript-duration">{formatDuration(transcript.duration_ms)}</span>
+                      </div>
                       {#if copiedId === transcript.id}
                         <span class="badge">Copied</span>
                       {/if}
                     </div>
-                    <div class="transcript-body">
+                    <div class="transcript-main">
                       <div class="transcript-text">
                         <h3 class="transcript-title">{resolveTitle(transcript)}</h3>
                         <p class="transcript-summary">{resolveSummary(transcript)}</p>
@@ -1772,35 +1806,35 @@
                         {/if}
                         <div class="transcript-fade"></div>
                       </div>
-                      <div class="transcript-actions">
-                        <button
-                          class="icon-button subtle"
-                          type="button"
-                          aria-label="Expand transcript"
-                          on:click|stopPropagation={() => openTranscriptDetail(transcript)}
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M4 9V4h5" />
-                            <path d="M20 15v5h-5" />
-                            <path d="M15 4h5v5" />
-                            <path d="M9 20H4v-5" />
-                          </svg>
-                        </button>
-                        <button
-                          class="icon-button subtle danger"
-                          type="button"
-                          aria-label="Delete transcript"
-                          on:click|stopPropagation={() => (deleteConfirmTranscript = transcript)}
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M3 6h18" />
-                            <path d="M8 6V4h8v2" />
-                            <path d="M6 6l1 14h10l1-14" />
-                            <path d="M10 11v6" />
-                            <path d="M14 11v6" />
-                          </svg>
-                        </button>
-                      </div>
+                    </div>
+                    <div class="transcript-actions" aria-label="Transcript actions">
+                      <button
+                        class="icon-button subtle"
+                        type="button"
+                        aria-label="Expand transcript"
+                        on:click|stopPropagation={() => openTranscriptDetail(transcript)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M4 9V4h5" />
+                          <path d="M20 15v5h-5" />
+                          <path d="M15 4h5v5" />
+                          <path d="M9 20H4v-5" />
+                        </svg>
+                      </button>
+                      <button
+                        class="icon-button subtle danger"
+                        type="button"
+                        aria-label="Delete transcript"
+                        on:click|stopPropagation={() => (deleteConfirmTranscript = transcript)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M3 6h18" />
+                          <path d="M8 6V4h8v2" />
+                          <path d="M6 6l1 14h10l1-14" />
+                          <path d="M10 11v6" />
+                          <path d="M14 11v6" />
+                        </svg>
+                      </button>
                     </div>
                   </div>
                 {/each}
@@ -1941,7 +1975,11 @@
                       <label for="record-hotkey">Record toggle</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="record-hotkey" bind:value={settings.hotkeys.record_toggle} />
+                      <HotkeyInput
+                        id="record-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={settings.hotkeys.record_toggle}
+                      />
                     </div>
                   </div>
                   <div class="settings-row">
@@ -1949,7 +1987,11 @@
                       <label for="paste-hotkey">Paste last</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="paste-hotkey" bind:value={settings.hotkeys.paste_last} />
+                      <HotkeyInput
+                        id="paste-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={settings.hotkeys.paste_last}
+                      />
                     </div>
                   </div>
                   <div class="settings-row">
@@ -1957,7 +1999,11 @@
                       <label for="open-hotkey">Open app</label>
                     </div>
                     <div class="settings-control">
-                      <HotkeyInput id="open-hotkey" bind:value={settings.hotkeys.open_app} />
+                      <HotkeyInput
+                        id="open-hotkey"
+                        platform={runtimeInfo?.session_type ?? 'unknown'}
+                        bind:value={settings.hotkeys.open_app}
+                      />
                     </div>
                   </div>
                 </div>
@@ -2201,6 +2247,19 @@
                   </div>
                   <div class="settings-row">
                     <div class="settings-label">
+                      <label for="recording-hud">Recording pill</label>
+                      <p class="settings-hint">Show a floating recording control above the dock while recording.</p>
+                    </div>
+                    <div class="settings-control">
+                      <input
+                        id="recording-hud"
+                        type="checkbox"
+                        bind:checked={settings.ui.recording_hud_enabled}
+                      />
+                    </div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="settings-label">
                         <label for="use-gpu">GPU acceleration</label>
                         <p class="settings-hint">
                           {performanceInfo?.gpu_supported
@@ -2316,19 +2375,23 @@
                   </div>
                   <div class="settings-row">
                     <div class="settings-label">
-                      <label for="sample-rate">Sample rate (Hz)</label>
-                      <p class="settings-hint">16kHz recommended for speech.</p>
+                      <label for="sample-rate">Sample rate</label>
+                      <p class="settings-hint">16 kHz recommended for speech.</p>
                     </div>
                     <div class="settings-control">
-                      <input
+                      <select
                         id="sample-rate"
-                        class="input-compact"
-                        type="number"
-                        min="8000"
-                        max="48000"
-                        step="1000"
+                        class="select-compact"
                         bind:value={settings.audio.sample_rate_hz}
-                      />
+                        aria-label="Sample rate"
+                      >
+                        <option value={8000}>8 kHz</option>
+                        <option value={16000}>16 kHz</option>
+                        <option value={22050}>22.05 kHz</option>
+                        <option value={24000}>24 kHz</option>
+                        <option value={44100}>44.1 kHz</option>
+                        <option value={48000}>48 kHz</option>
+                      </select>
                     </div>
                   </div>
                   <div class="settings-row">

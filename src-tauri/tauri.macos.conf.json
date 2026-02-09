@@ -3,6 +3,9 @@
   "build": {
     "features": ["metal"]
   },
+  "app": {
+    "macOSPrivateApi": true
+  },
   "bundle": {
     "targets": ["app", "dmg"],
     "createUpdaterArtifacts": true,
